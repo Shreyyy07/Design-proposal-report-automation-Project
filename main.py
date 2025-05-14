@@ -15,6 +15,8 @@ import pyautogui
 import pygetwindow as gw
 import time
 import shutil
+import traceback
+
 
 # ---------- PDF Extraction ----------
 def extract_pdf_info(pdf_path):
@@ -114,7 +116,107 @@ def open_autocad_and_capture_screenshot(dwg_path):
     except Exception as e:
         st.error(f"Error opening AutoCAD or capturing screenshot: {e}")
         return None
+    
+def open_nx_and_capture_views(prt_file_path, manual_file_open=True):
+    try:
+        # Launch NX with optimized startup
+        nx_path = r"D:\abcde\NXBIN\ugraf.exe"  # Adjust this to your NX installation path
+        nx_process = subprocess.Popen([nx_path], shell=True)
+        st.info("Opening NX... Please wait for the application to load.")
+        time.sleep(20)  # Reduced wait time for NX to initialize
+        
+        # Find and activate the NX window - more efficient window detection
+        nx_window = None
+        attempts = 0
+        while attempts < 3 and not nx_window:  # Reduced attempts
+            for w in gw.getWindowsWithTitle('NX'):
+                if 'NX' in w.title:
+                    if not w.isMaximized:
+                        w.maximize()
+                    w.activate()
+                    nx_window = w
+                    break
+            if not nx_window:
+                time.sleep(3)  # Reduced wait time
+                attempts += 1
+                
+        if not nx_window:
+            st.error("Could not find NX window. Please check if NX launched properly.")
+            return {}
 
+        # Dismiss any startup dialogs
+        pyautogui.press('escape')
+        time.sleep(1)  # Reduced wait time
+        
+        # Click on empty area and ensure NX is active
+        screen_width, screen_height = pyautogui.size()
+        pyautogui.click(screen_width//2, screen_height//2)
+        nx_window.activate()
+
+        # Display instructions for manual file opening
+        st.warning(f"Please manually open the file: {prt_file_path}")
+        st.info("After opening the file, the script will automatically capture views and close NX.")
+        
+        # Wait for the user to manually open the file
+        time.sleep(15)  # Reduced wait time
+        
+        st.info("Now capturing different views...")
+        
+        # Simplified view method using function keys (most reliable across NX versions)
+        function_keys = {
+            'top': 'f3',
+            'front': 'f7',
+            'right': 'f6',
+            'isometric': 'f9'
+        }
+        
+        # Capture only essential views to reduce time
+        screenshots = {}
+        
+        # Capture each view
+        for view, key in function_keys.items():
+            nx_window.activate()
+            pyautogui.press(key)
+            time.sleep(1)  # Wait briefly for view to change
+            
+            # Fit view to screen
+            pyautogui.press('f')
+            time.sleep(1)
+            
+            # Capture screenshot
+            screenshot = pyautogui.screenshot()
+            img_path = os.path.join(tempfile.gettempdir(), f"nxview_{view}.png")
+            screenshot.save(img_path)
+            screenshots[view] = img_path
+            st.success(f"Captured {view} view")
+
+        # Close NX immediately after capturing
+        nx_window.activate()
+        pyautogui.hotkey('alt', 'f4')
+        time.sleep(1)
+        
+        # Handle any save dialog by pressing 'n' (No)
+        pyautogui.press('n')
+        
+        # Ensure process is terminated
+        try:
+            nx_process.terminate()
+        except:
+            pass
+
+        st.success("Completed NX session and closed application!")
+        return screenshots
+
+    except Exception as e:
+        st.error(f"Error in NX automation: {e}")
+        # Try to close NX forcefully if there was an error
+        try:
+            for w in gw.getWindowsWithTitle('NX'):
+                w.close()
+        except:
+            pass
+        return {}
+    
 # ---------- PDF Report Generator ----------
 def generate_pdf(pdf_info, excel_df, image_path, cad_image_path, output_path):
     doc = SimpleDocTemplate(output_path, pagesize=A4)
@@ -151,6 +253,15 @@ def generate_pdf(pdf_info, excel_df, image_path, cad_image_path, output_path):
             ("GRID", (0, 0), (-1, -1), 1, colors.black),
         ]))
         elements.append(table)
+    
+    # Fixed NX views inclusion - removed duplicate code
+    if 'nx_views' in st.session_state:
+        elements.append(Spacer(1, 20))
+        elements.append(Paragraph("3D Model Views (NX):", styles["Heading2"]))
+        for view, path in st.session_state['nx_views'].items():
+            elements.append(Paragraph(f"{view.capitalize()} View:", styles["Normal"]))
+            elements.append(Image(path, width=300, height=200))
+
     doc.build(elements)
 
 # ---------- PPTX Report Generator ----------
@@ -186,6 +297,16 @@ def generate_pptx(pdf_info, excel_df, image_path, cad_image_path, output_path):
             for c in range(cols):
                 table.cell(r+1, c).text = str(excel_df.iloc[r, c])
 
+    # Fixed NX views inclusion - removed duplicate code
+    if 'nx_views' in st.session_state:
+        slide = prs.slides.add_slide(prs.slide_layouts[5])
+        slide.shapes.title.text = "NX 3D Model Views"
+        left = Inches(0.5)
+        top = Inches(1.5)
+        for i, (view, path) in enumerate(st.session_state['nx_views'].items()):
+            if os.path.exists(path):
+                slide.shapes.add_picture(path, left + Inches((i % 2) * 4.5), top + Inches((i // 2) * 2.5), width=Inches(4))
+
     prs.save(output_path)
 
 # ---------- Streamlit GUI ----------
@@ -204,8 +325,11 @@ if 'cad_file_uploaded' not in st.session_state:
 if 'processing_cad' not in st.session_state:
     st.session_state['processing_cad'] = False
 
-# Create two tabs: one for capturing CAD and one for generating reports
-tab1, tab2 = st.tabs(["📸 Capture CAD Drawing", "📄 Generate Reports"])
+if 'nx_views' not in st.session_state:
+    st.session_state['nx_views'] = {}
+
+# Create tabs with reordered sections: AutoCAD, NX, Reports (as requested)
+tab1, tab3, tab2 = st.tabs(["📸 Capture CAD Drawing", "📐 Capture NX 3D Views", "📄 Generate Reports"])
 
 with tab1:
     cad_file = st.file_uploader("Upload 2D CAD File (.dwg)", type=["dwg"], 
@@ -247,6 +371,29 @@ with tab1:
             st.session_state['cad_screenshot_path'] = None
             st.rerun()
 
+with tab3:
+    st.header("📐 NX 3D View Capture")
+    prt_file = st.file_uploader("Upload 3D Model File (.prt or .step)", type=["prt", "step"], key="nx_uploader")
+
+    if st.button("Capture 3D Views", key="nx_capture_btn") and prt_file:
+        temp_prt_path = os.path.join(tempfile.gettempdir(), prt_file.name)
+        with open(temp_prt_path, "wb") as f:
+            f.write(prt_file.read())
+
+        with st.spinner("Opening NX and capturing views... This will close automatically"):
+            views = open_nx_and_capture_views(temp_prt_path)
+
+        if views:
+            st.success("✅ Captured 3D views from NX successfully!")
+            st.session_state['nx_views'] = views
+            
+            # Show a collapsible section with the captured views
+            with st.expander("View Captured Screenshots"):
+                for name, path in views.items():
+                    st.image(path, caption=f"{name.capitalize()} View")
+        else:
+            st.error("Failed to capture 3D views from NX.")
+
 with tab2:
     pdf_file = st.file_uploader("Upload PDF File (Specs)", type=["pdf"])
     excel_file = st.file_uploader("Upload Excel File", type=["xlsx"])
@@ -276,6 +423,7 @@ with tab2:
                 wear_zones = analyze_wear_image(img_path)
                 pdf_info.append(f"Wear Zones Detected: {wear_zones}")
 
+                # Generate reports directly using existing data without reopening NX
                 generate_pdf(pdf_info, excel_df, img_path, cad_screenshot_path, pdf_out_path)
                 generate_pptx(pdf_info, excel_df, img_path, cad_screenshot_path, pptx_path)
 

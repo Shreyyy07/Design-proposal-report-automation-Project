@@ -4,6 +4,7 @@ env/
 .env/
 .venv/
 ENV/
+.streamlit/
 
 # Python cache files
 __pycache__/

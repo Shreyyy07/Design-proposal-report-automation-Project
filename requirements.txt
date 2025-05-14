@@ -1,0 +1,13 @@
+streamlit
+pdfplumber
+opencv-python-headless
+pandas
+reportlab
+matplotlib
+openpyxl
+python-pptx
+pyautogui
+pygetwindow
+pymsgbox
+pytweening
+pyscreeze
