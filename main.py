@@ -507,22 +507,33 @@ def analyze_wear_image(image_path):
         return 0
     
 # ---------- SESSION STATE INITIALIZATION (NEW) ----------
+
 def initialize_session_state():
-    """
-    Initialize all session state variables
-    """
-    session_vars = {
-        'cad_screenshot_captured': False,
-        'cad_screenshot_path': None,
-        'cad_file_uploaded': False,
-        'processing_cad': False,
-        'nx_views': {},
-        'wear_analysis_results': {}
-    }
+    if 'cad_screenshots_captured' not in st.session_state:
+        st.session_state['cad_screenshots_captured'] = False
+    if 'cad_screenshot_paths' not in st.session_state:
+        st.session_state['cad_screenshot_paths'] = []
+    if 'multiple_wear_results' not in st.session_state:
+        st.session_state['multiple_wear_results'] = []
+    if 'wear_image_paths' not in st.session_state:
+        st.session_state['wear_image_paths'] = []
+
+# def initialize_session_state():
+#     """
+#     Initialize all session state variables
+#     """
+#     session_vars = {
+#         'cad_screenshot_captured': False,
+#         'cad_screenshot_path': None,
+#         'cad_file_uploaded': False,
+#         'processing_cad': False,
+#         'nx_views': {},
+#         'wear_analysis_results': {}
+#     }
     
-    for var, default_value in session_vars.items():
-        if var not in st.session_state:
-            st.session_state[var] = default_value
+#     for var, default_value in session_vars.items():
+#         if var not in st.session_state:
+#             st.session_state[var] = default_value
 
 # ---------- PDF Extraction (UNCHANGED) ----------
 def extract_pdf_info(pdf_path):
@@ -573,15 +584,18 @@ def open_autocad_and_capture_screenshot(dwg_path):
         pyautogui.typewrite('e\n')
         time.sleep(5)  # Wait more after zoom
 
-        # Take full screen screenshot
+        # Take full screen screenshot first
         screenshot = pyautogui.screenshot()
 
-        # Crop the central area (adjust cropping if needed)
+        # UPDATED: Crop only the drawing area (excluding toolbars, ribbons, command line)
+        # These coordinates target the main drawing viewport area in AutoCAD
         screen_width, screen_height = pyautogui.size()
-        left = screen_width * 0.15
-        top = screen_height * 0.10
-        right = screen_width * 0.85
-        bottom = screen_height * 0.90
+        
+        # More precise cropping for drawing area only
+        left = screen_width * 0.05   # Remove left panel/toolbars
+        top = screen_height * 0.15   # Remove ribbon and title bar
+        right = screen_width * 0.95  # Remove right panels
+        bottom = screen_height * 0.85  # Remove command line and status bar
 
         cropped_screenshot = screenshot.crop((left, top, right, bottom))
 
@@ -613,18 +627,21 @@ def open_autocad_and_capture_screenshot(dwg_path):
         return None
     
 # ---------- NX Functions (UNCHANGED) ----------
-def open_nx_and_capture_views(prt_file_path="", manual_file_open=True):
+def open_nx_and_capture_views_manual(prt_file_path="", manual_file_open=True):
+    """
+    Enhanced NX automation with precise viewport capture and clear user signals
+    """
     try:
         # Launch NX with optimized startup
         nx_path = r"D:\abcde\NXBIN\ugraf.exe"  # Adjust this to your NX installation path
         nx_process = subprocess.Popen([nx_path], shell=True)
         st.info("Opening NX... Please wait for the application to load.")
-        time.sleep(20)  # Reduced wait time for NX to initialize
+        time.sleep(20)  # Wait for NX to initialize
         
-        # Find and activate the NX window - more efficient window detection
+        # Find and activate the NX window
         nx_window = None
         attempts = 0
-        while attempts < 3 and not nx_window:  # Reduced attempts
+        while attempts < 3 and not nx_window:
             for w in gw.getWindowsWithTitle('NX'):
                 if 'NX' in w.title:
                     if not w.isMaximized:
@@ -633,7 +650,7 @@ def open_nx_and_capture_views(prt_file_path="", manual_file_open=True):
                     nx_window = w
                     break
             if not nx_window:
-                time.sleep(3)  # Reduced wait time
+                time.sleep(3)
                 attempts += 1
                 
         if not nx_window:
@@ -642,7 +659,7 @@ def open_nx_and_capture_views(prt_file_path="", manual_file_open=True):
 
         # Dismiss any startup dialogs
         pyautogui.press('escape')
-        time.sleep(1)  # Reduced wait time
+        time.sleep(1)
         
         # Click on empty area and ensure NX is active
         screen_width, screen_height = pyautogui.size()
@@ -651,45 +668,105 @@ def open_nx_and_capture_views(prt_file_path="", manual_file_open=True):
 
         # Display instructions for manual file opening
         st.warning("Please manually open your 3D file in NX now.")
-        st.info("After opening the file, the script will automatically capture views and close NX.")
+        st.info("After opening the file, follow the instructions below for each view.")
         
         # Wait for the user to manually open the file
-        time.sleep(15)  # Reduced wait time
+        time.sleep(20)  # Increased wait time for manual file opening
         
-        st.info("Now capturing different views...")
-        
-        # Simplified view method using function keys (most reliable across NX versions)
-        function_keys = {
-            'top': 'f3',
-            'front': 'f7',
-            'right': 'f6',
-            'isometric': 'f9'
-        }
-        
-        # Capture only essential views to reduce time
+        # Manual view capture with enhanced user feedback
+        views_to_capture = ['Top', 'Front', 'Right', 'Isometric']
         screenshots = {}
         
-        # Capture each view
-        for view, key in function_keys.items():
-            nx_window.activate()
-            pyautogui.press(key)
-            time.sleep(1)  # Wait briefly for view to change
+        # Create placeholders for dynamic updates
+        status_placeholder = st.empty()
+        progress_placeholder = st.empty()
+        
+        for i, view in enumerate(views_to_capture):
+            # Update status with clear instructions
+            status_placeholder.info(f"📍 **Step {i+1}/4**: Please manually rotate/change to **{view}** view in NX")
+            progress_placeholder.progress((i) / len(views_to_capture))
             
-            # Fit view to screen
-            pyautogui.press('f')
+            # Enhanced countdown with visual feedback
+            countdown_placeholder = st.empty()
+            for countdown in range(10, 0, -1):
+                countdown_placeholder.warning(f"⏰ Capturing {view} view in {countdown} seconds... Please set your view now!")
+                time.sleep(1)
+            
+            countdown_placeholder.empty()
+            
+            # CAPTURE PREPARATION SIGNAL
+            prepare_placeholder = st.empty()
+            prepare_placeholder.error("🔴 **PREPARING TO CAPTURE** - Hold your view steady!")
+            time.sleep(2)
+            prepare_placeholder.empty()
+            
+            # Ensure NX window is active
+            nx_window.activate()
             time.sleep(1)
             
-            # Capture screenshot
+            # Fit view to screen for better capture
+            pyautogui.press('f')
+            time.sleep(2)
+            
+            # CAPTURE MOMENT SIGNAL
+            capture_placeholder = st.empty()
+            capture_placeholder.success("📸 **CAPTURING NOW** - Screenshot being taken!")
+            
+            # UPDATED: Capture only the 3D viewport area (not entire NX window)
             screenshot = pyautogui.screenshot()
-            img_path = os.path.join(tempfile.gettempdir(), f"nxview_{view}.png")
-            screenshot.save(img_path)
-            screenshots[view] = img_path
-            st.success(f"Captured {view} view")
+            
+            # Crop to NX viewport only (excluding menus, toolbars, etc.)
+            # These coordinates target the main 3D viewport in NX
+            left = screen_width * 0.12   # Remove left toolbar area
+            top = screen_height * 0.12   # Remove ribbon and title bar
+            right = screen_width * 0.88  # Remove right panels
+            bottom = screen_height * 0.88  # Remove bottom status/command area
+            
+            cropped_screenshot = screenshot.crop((left, top, right, bottom))
+            
+            # Save the cropped viewport screenshot
+            img_path = os.path.join(tempfile.gettempdir(), f"nxview_{view.lower()}.png")
+            cropped_screenshot.save(img_path)
+            screenshots[view.lower()] = img_path
+            
+            capture_placeholder.empty()
+            
+            # SUCCESS CONFIRMATION SIGNAL with Enhanced Feedback
+            success_placeholder = st.empty()
+            success_placeholder.success(f"✅ **{view} VIEW CAPTURED SUCCESSFULLY!** 🎉")
+            
+            # Add a brief visual confirmation
+            time.sleep(3)  # Hold success message longer
+            success_placeholder.empty()
+            
+            # Audio-like feedback through rapid status changes (simulating beep)
+            if i < len(views_to_capture) - 1:  # Don't show for last capture
+                beep_placeholder = st.empty()
+                for beep in range(3):
+                    beep_placeholder.info("🔊 BEEP!")
+                    time.sleep(0.3)
+                    beep_placeholder.empty()
+                    time.sleep(0.2)
+                
+                # Pause message before next view
+                next_view_placeholder = st.empty()
+                next_view_placeholder.warning(f"⏳ Get ready for next view: **{views_to_capture[i+1]}** in 5 seconds...")
+                time.sleep(5)
+                next_view_placeholder.empty()
 
-        # Close NX immediately after capturing
+        # Final status update with celebration
+        status_placeholder.success("🎉 **ALL VIEWS CAPTURED SUCCESSFULLY!** 🎉")
+        progress_placeholder.progress(1.0)
+        
+        # Final success confirmation
+        final_placeholder = st.empty()
+        final_placeholder.balloons()  # Streamlit balloons animation
+        
+        # Close NX after capturing all views
+        st.info("Closing NX application...")
         nx_window.activate()
         pyautogui.hotkey('alt', 'f4')
-        time.sleep(1)
+        time.sleep(2)
         
         # Handle any save dialog by pressing 'n' (No)
         pyautogui.press('n')
@@ -700,7 +777,7 @@ def open_nx_and_capture_views(prt_file_path="", manual_file_open=True):
         except:
             pass
 
-        st.success("Completed NX session and closed application!")
+        st.success("✅ Completed NX session and closed application!")
         return screenshots
 
     except Exception as e:
@@ -714,9 +791,9 @@ def open_nx_and_capture_views(prt_file_path="", manual_file_open=True):
         return {}
     
 # ---------- UPDATED PDF Report Generator ----------
-def generate_pdf(pdf_info, excel_df, image_path, cad_image_path, output_path):
+def generate_pdf(pdf_info, excel_df, image_paths, cad_image_paths, output_path):
     """
-    UPDATED: Enhanced PDF generation with comprehensive wear analysis and better formatting
+    UPDATED: Enhanced PDF generation with multiple file support
     """
     doc = SimpleDocTemplate(output_path, pagesize=A4, 
                           topMargin=72, bottomMargin=72, leftMargin=72, rightMargin=72)
@@ -729,32 +806,34 @@ def generate_pdf(pdf_info, excel_df, image_path, cad_image_path, output_path):
     
     # PDF Content Section
     elements.append(Paragraph("Extracted PDF Content:", styles["Heading2"]))
-    elements.append(Spacer(1, 6))  # Small space after heading
+    elements.append(Spacer(1, 6))
     for i, pg in enumerate(pdf_info):
-        # Skip the wear analysis summary that was added separately
         if not pg.startswith("Comprehensive Wear Analysis:"):
             elements.append(Paragraph(pg.replace('\n', '<br/>'), styles["Normal"]))
-            if i < len(pdf_info) - 1:  # Don't add spacer after last item
+            if i < len(pdf_info) - 1:
                 elements.append(Spacer(1, 6))
 
     elements.append(Spacer(1, 15))
     
-    # Enhanced Wear Analysis Section - Keep everything together
+    # Enhanced Wear Analysis Section
     if 'wear_analysis_results' in st.session_state and st.session_state['wear_analysis_results']:
         wear_results = st.session_state['wear_analysis_results']
         
-        # Add heading
         elements.append(Paragraph("Comprehensive Wear Analysis:", styles["Heading2"]))
         elements.append(Spacer(1, 6))
         
-        # Add original wear image first (right after heading)
-        if image_path and os.path.exists(image_path):
-            elements.append(Paragraph("Original Tyre Image:", styles["Heading3"]))
-            elements.append(Spacer(1, 3))
-            elements.append(Image(image_path, width=250, height=180))
-            elements.append(Spacer(1, 10))
+        # Add multiple wear images
+        elements.append(Paragraph("Tyre Images:", styles["Heading3"]))
+        elements.append(Spacer(1, 3))
         
-        # Wear summary table
+        for i, image_path in enumerate(image_paths):
+            if image_path and os.path.exists(image_path):
+                elements.append(Paragraph(f"Tyre Image {i+1}:", styles["Normal"]))
+                elements.append(Spacer(1, 3))
+                elements.append(Image(image_path, width=250, height=180))
+                elements.append(Spacer(1, 10))
+        
+        # Wear analysis results table
         elements.append(Paragraph("Analysis Results:", styles["Heading3"]))
         elements.append(Spacer(1, 3))
         
@@ -779,26 +858,22 @@ def generate_pdf(pdf_info, excel_df, image_path, cad_image_path, output_path):
         elements.append(wear_table)
         elements.append(Spacer(1, 10))
         
-        # Recommendations
         elements.append(Paragraph("Recommendations:", styles["Heading3"]))
         elements.append(Spacer(1, 3))
         elements.append(Paragraph(wear_results['recommendations'], styles["Normal"]))
-        elements.append(Spacer(1, 10))
-        
-        # Wear visualization
-        if (wear_results.get('wear_map_path') and 
-            os.path.exists(wear_results['wear_map_path'])):
-            elements.append(Paragraph("Wear Pattern Analysis:", styles["Heading3"]))
-            elements.append(Spacer(1, 3))
-            elements.append(Image(wear_results['wear_map_path'], width=400, height=300))
-            elements.append(Spacer(1, 15))
-
-    # CAD Screenshot Section
-    if cad_image_path:
-        elements.append(Paragraph("2D CAD File Screenshot:", styles["Heading2"]))
-        elements.append(Spacer(1, 6))
-        elements.append(Image(cad_image_path, width=300, height=200))
         elements.append(Spacer(1, 15))
+
+    # Multiple CAD Screenshots Section
+    if cad_image_paths:
+        elements.append(Paragraph("2D CAD File Screenshots:", styles["Heading2"]))
+        elements.append(Spacer(1, 6))
+        
+        for i, cad_path in enumerate(cad_image_paths):
+            if cad_path and os.path.exists(cad_path):
+                elements.append(Paragraph(f"CAD Drawing {i+1}:", styles["Normal"]))
+                elements.append(Spacer(1, 3))
+                elements.append(Image(cad_path, width=300, height=200))
+                elements.append(Spacer(1, 10))
 
     # Excel data Section
     if not excel_df.empty:
@@ -831,9 +906,9 @@ def generate_pdf(pdf_info, excel_df, image_path, cad_image_path, output_path):
     doc.build(elements)
 
     # ---------- UPDATED PPTX Report Generator ----------
-def generate_pptx(pdf_info, excel_df, image_path, cad_image_path, output_path):
+def generate_pptx(pdf_info, excel_df, image_paths, cad_image_paths, output_path):
     """
-    UPDATED: Enhanced PPTX generation with original tyre image in wear analysis slide
+    UPDATED: Enhanced PPTX generation with proper titles and multiple file support
     """
     prs = Presentation()
     
@@ -850,27 +925,33 @@ def generate_pptx(pdf_info, excel_df, image_path, cad_image_path, output_path):
     tf = slide2.placeholders[1].text_frame
     tf.text = "\n--- PAGE SPLIT ---\n".join(filtered_pdf_info)
 
-    # Slide 3: Enhanced Wear Analysis Summary with Original Image
+    # Slide 3: Enhanced Wear Analysis Summary with Original Images
     if 'wear_analysis_results' in st.session_state and st.session_state['wear_analysis_results']:
         wear_results = st.session_state['wear_analysis_results']
         
-        # Use layout 5 (Title and Content) instead of layout 6 (blank)
-        slide3 = prs.slides.add_slide(prs.slide_layouts[5])
+        # Create slide with blank layout and add title manually
+        slide3 = prs.slides.add_slide(prs.slide_layouts[6])  # Blank layout
         
-        # Add title using text box since layout 5 might not have title placeholder
-        title_box = slide3.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(9), Inches(0.8))
-        title_frame = title_box.text_frame
+        # Add title manually
+        title_shape = slide3.shapes.add_textbox(Inches(1), Inches(0.5), Inches(8), Inches(1))
+        title_frame = title_shape.text_frame
         title_frame.text = "Comprehensive Wear Analysis"
         title_para = title_frame.paragraphs[0]
-        title_para.font.size = Inches(0.3)
+        title_para.font.size = Inches(0.4)
         title_para.font.bold = True
         
-        # Add original tyre image on the left
-        if image_path and os.path.exists(image_path):
-            slide3.shapes.add_picture(image_path, Inches(0.5), Inches(1.5), width=Inches(4), height=Inches(3))
+        # Add multiple wear analysis images if available
+        current_y = Inches(1.5)
+        image_count = 0
         
-        # Add text box with analysis results on the right
-        textbox = slide3.shapes.add_textbox(Inches(5), Inches(1.5), Inches(4.5), Inches(4.5))
+        for i, image_path in enumerate(image_paths):
+            if image_path and os.path.exists(image_path) and image_count < 2:  # Limit to 2 images per slide
+                slide3.shapes.add_picture(image_path, Inches(0.5 + (image_count * 4.5)), current_y, 
+                                        width=Inches(4), height=Inches(3))
+                image_count += 1
+        
+        # Add text box with analysis results
+        textbox = slide3.shapes.add_textbox(Inches(1), Inches(5), Inches(8), Inches(2))
         text_frame = textbox.text_frame
         
         # Create wear analysis content
@@ -879,60 +960,54 @@ def generate_pptx(pdf_info, excel_df, image_path, cad_image_path, output_path):
 • Condition: {wear_results['condition']}
 • Safety Status: {wear_results['safety_status']}
 • Remaining Life: {wear_results['remaining_life_months']} months
-• Tread Depth Score: {wear_results['tread_depth_score']:.1f}
-• Pattern Integrity: {wear_results['pattern_integrity']:.1f}%
 
-Recommendations:
-{wear_results['recommendations']}"""
+Recommendations: {wear_results['recommendations']}"""
         
         text_frame.text = wear_content
 
-    # Slide 4: Wear Visualization (if available)
-    if ('wear_analysis_results' in st.session_state and 
-        st.session_state['wear_analysis_results'].get('wear_map_path') and
-        os.path.exists(st.session_state['wear_analysis_results']['wear_map_path'])):
+    # Slide 4: CAD Screenshots (Multiple)
+    if cad_image_paths:
+        slide4 = prs.slides.add_slide(prs.slide_layouts[6])  # Blank layout
         
-        slide4 = prs.slides.add_slide(prs.slide_layouts[5])
-        
-        # Add title using text box
-        title_box = slide4.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(9), Inches(0.8))
-        title_frame = title_box.text_frame
-        title_frame.text = "Wear Pattern Visualization"
+        # Add title manually
+        title_shape = slide4.shapes.add_textbox(Inches(1), Inches(0.5), Inches(8), Inches(1))
+        title_frame = title_shape.text_frame
+        title_frame.text = "2D CAD File Screenshots"
         title_para = title_frame.paragraphs[0]
-        title_para.font.size = Inches(0.3)
+        title_para.font.size = Inches(0.4)
         title_para.font.bold = True
         
-        slide4.shapes.add_picture(st.session_state['wear_analysis_results']['wear_map_path'], 
-                                Inches(0.5), Inches(1.5), width=Inches(8))
-
-    # Slide 5: CAD Screenshot
-    if cad_image_path and os.path.exists(cad_image_path):
-        slide5 = prs.slides.add_slide(prs.slide_layouts[5])
+        # Add CAD images in a grid
+        images_per_row = 2
+        current_row = 0
+        current_col = 0
         
-        # Add title using text box
-        title_box = slide5.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(9), Inches(0.8))
-        title_frame = title_box.text_frame
-        title_frame.text = "2D CAD File Screenshot"
-        title_para = title_frame.paragraphs[0]
-        title_para.font.size = Inches(0.3)
-        title_para.font.bold = True
-        
-        slide5.shapes.add_picture(cad_image_path, Inches(1), Inches(1.5), width=Inches(6))
+        for i, cad_path in enumerate(cad_image_paths):
+            if cad_path and os.path.exists(cad_path):
+                x_pos = Inches(0.5 + (current_col * 4.5))
+                y_pos = Inches(1.5 + (current_row * 2.5))
+                
+                slide4.shapes.add_picture(cad_path, x_pos, y_pos, width=Inches(4), height=Inches(2))
+                
+                current_col += 1
+                if current_col >= images_per_row:
+                    current_col = 0
+                    current_row += 1
 
-    # Slide 6: Excel Specifications
+    # Slide 5: Excel Specifications
     if not excel_df.empty:
-        slide6 = prs.slides.add_slide(prs.slide_layouts[5])
+        slide5 = prs.slides.add_slide(prs.slide_layouts[6])  # Blank layout
         
-        # Add title using text box
-        title_box = slide6.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(9), Inches(0.8))
-        title_frame = title_box.text_frame
+        # Add title manually
+        title_shape = slide5.shapes.add_textbox(Inches(1), Inches(0.5), Inches(8), Inches(1))
+        title_frame = title_shape.text_frame
         title_frame.text = "Tyre Specifications"
         title_para = title_frame.paragraphs[0]
-        title_para.font.size = Inches(0.3)
+        title_para.font.size = Inches(0.4)
         title_para.font.bold = True
         
         rows, cols = excel_df.shape
-        table = slide6.shapes.add_table(rows+1, cols, Inches(0.5), Inches(1.5), 
+        table = slide5.shapes.add_table(rows+1, cols, Inches(0.5), Inches(1.5), 
                                        Inches(8.5), Inches(0.8 + rows * 0.3)).table
         for i, col in enumerate(excel_df.columns):
             table.cell(0, i).text = str(col)
@@ -940,23 +1015,23 @@ Recommendations:
             for c in range(cols):
                 table.cell(r+1, c).text = str(excel_df.iloc[r, c])
 
-    # Slide 7: NX 3D Model Views
+    # Slide 6: NX 3D Model Views
     if 'nx_views' in st.session_state and st.session_state['nx_views']:
-        slide7 = prs.slides.add_slide(prs.slide_layouts[5])
+        slide6 = prs.slides.add_slide(prs.slide_layouts[6])  # Blank layout
         
-        # Add title using text box
-        title_box = slide7.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(9), Inches(0.8))
-        title_frame = title_box.text_frame
+        # Add title manually
+        title_shape = slide6.shapes.add_textbox(Inches(1), Inches(0.5), Inches(8), Inches(1))
+        title_frame = title_shape.text_frame
         title_frame.text = "NX 3D Model Views"
         title_para = title_frame.paragraphs[0]
-        title_para.font.size = Inches(0.3)
+        title_para.font.size = Inches(0.4)
         title_para.font.bold = True
         
         left = Inches(0.5)
         top = Inches(1.5)
         for i, (view, path) in enumerate(st.session_state['nx_views'].items()):
             if os.path.exists(path):
-                slide7.shapes.add_picture(path, left + Inches((i % 2) * 4.5), 
+                slide6.shapes.add_picture(path, left + Inches((i % 2) * 4.5), 
                                         top + Inches((i // 2) * 2.5), width=Inches(4))
 
     prs.save(output_path)
@@ -965,10 +1040,10 @@ Recommendations:
 # ---------- ENHANCED STREAMLIT GUI ----------
 def main():
     """
-    Main Streamlit application with enhanced wear analysis
+    Main Streamlit application with enhanced wear analysis and multiple file support
     """
     st.title("🛞 Enhanced Tyre Report Generator with Advanced Wear Analysis")
-    st.markdown("*Features: PDF extraction, Excel data, CAD capture, NX 3D views, and AI-powered wear analysis*")
+    st.markdown("*Features: Multiple PDF/Excel files, Multiple CAD captures, Multiple wear images, NX 3D views, and AI-powered analysis*")
 
     # Initialize session state
     initialize_session_state()
@@ -982,185 +1057,232 @@ def main():
     ])
 
     with tab1:
-        st.header("📸 AutoCAD Drawing Capture")
-        cad_file = st.file_uploader("Upload 2D CAD File (.dwg)", type=["dwg"], 
-                                 key="cad_uploader",
-                                 on_change=lambda: setattr(st.session_state, 'cad_file_uploaded', True))
-        
-        # Auto-process CAD file when uploaded
-        if (st.session_state['cad_file_uploaded'] and 
-            not st.session_state['processing_cad'] and 
-            not st.session_state['cad_screenshot_captured']):
-            
-            st.session_state['processing_cad'] = True
-            cad_temp_dir = tempfile.mkdtemp()
-            cad_path = os.path.join(cad_temp_dir, cad_file.name)
-
-            with open(cad_path, "wb") as f:
-                f.write(cad_file.read())
-
-            with st.spinner('Opening AutoCAD and capturing drawing... Please wait...'):
-                cad_screenshot_path = open_autocad_and_capture_screenshot(cad_path)
-
-            if cad_screenshot_path:
-                st.session_state['cad_screenshot_path'] = cad_screenshot_path
-                st.session_state['cad_screenshot_captured'] = True
-                st.success("Drawing captured successfully!")
-            else:
-                st.error("Failed to capture drawing.")
-            
-            st.session_state['processing_cad'] = False
-            st.session_state['cad_file_uploaded'] = False
-            st.rerun()
-        
-        # Show captured screenshot
-        if st.session_state['cad_screenshot_captured']:
-            st.success("✅ CAD drawing has been captured and is ready for report generation")
-            st.image(st.session_state['cad_screenshot_path'], caption="Captured CAD Drawing")
-            
-            if st.button("Capture Again"):
-                st.session_state['cad_screenshot_captured'] = False
-                st.session_state['cad_screenshot_path'] = None
-                st.rerun()
+        updated_tab1_section()  # Call the updated function
 
     with tab2:
-        st.header("🔍 Advanced Tyre Wear Analysis")
-        st.markdown("Upload a tyre wear image for comprehensive AI-powered analysis")
-        
-        wear_image_file = st.file_uploader("Upload Tyre Wear Image", 
-                                         type=["jpg", "png", "jpeg"], 
-                                         key="wear_image_uploader")
-        
-        if wear_image_file:
-            # Display uploaded image
-            st.image(wear_image_file, caption="Uploaded Wear Image", width=400)
-            
-            if st.button("🔍 Analyze Wear Pattern", key="analyze_wear_btn"):
-                # Save uploaded file temporarily
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
-                    tmp_file.write(wear_image_file.read())
-                    temp_image_path = tmp_file.name
-                
-                with st.spinner("Analyzing tyre wear pattern... Please wait..."):
-                    # Perform comprehensive wear analysis
-                    wear_percentage = analyze_wear_image(temp_image_path)
-                
-                if wear_percentage > 0:
-                    st.success("✅ Wear analysis completed successfully!")
-                else:
-                    st.error("❌ Wear analysis failed. Please try with a different image.")
+        updated_tab2_section()  # Call the updated function
 
     with tab3:
-      st.header("📐 NX 3D View Capture")
-      st.info("💡 Click the button below to open NX. You can then manually open your 3D file from within NX.")
+        updated_tab3_section()  # Call the updated function
+
+    with tab4:
+        updated_tab4_section()  # Call the updated function
+
+# ---------- UPDATED TAB SECTIONS ----------
+def updated_tab1_section():
+    """
+    Updated CAD section with multiple file upload support
+    """
+    st.header("📸 AutoCAD Drawing Capture")
+    cad_files = st.file_uploader("Upload 2D CAD Files (.dwg)", 
+                               type=["dwg"], 
+                               accept_multiple_files=True,
+                               key="cad_uploader_multiple")
     
-      if st.button("🚀 Open NX and Capture Views", key="nx_capture_btn"):
-        with st.spinner("Opening NX and preparing for view capture... Please manually open your 3D file in NX."):
-            views = open_nx_and_capture_views("", manual_file_open=True)
+    if cad_files:
+        st.info(f"📁 {len(cad_files)} CAD file(s) uploaded")
+        
+        if st.button("🚀 Process All CAD Files"):
+            cad_screenshot_paths = []
+            
+            with st.spinner('Processing CAD files... Please wait...'):
+                for i, cad_file in enumerate(cad_files):
+                    st.info(f"Processing file {i+1}/{len(cad_files)}: {cad_file.name}")
+                    
+                    cad_temp_dir = tempfile.mkdtemp()
+                    cad_path = os.path.join(cad_temp_dir, cad_file.name)
+                    
+                    with open(cad_path, "wb") as f:
+                        f.write(cad_file.read())
+                    
+                    cad_screenshot_path = open_autocad_and_capture_screenshot(cad_path)
+                    
+                    if cad_screenshot_path:
+                        # Rename to include file index
+                        new_path = os.path.join(tempfile.gettempdir(), f"cad_screenshot_{i+1}.png")
+                        shutil.copy2(cad_screenshot_path, new_path)
+                        cad_screenshot_paths.append(new_path)
+                        st.success(f"✅ Captured drawing {i+1}")
+                    else:
+                        st.error(f"❌ Failed to capture drawing {i+1}")
+            
+            if cad_screenshot_paths:
+                st.session_state['cad_screenshot_paths'] = cad_screenshot_paths
+                st.session_state['cad_screenshots_captured'] = True
+                st.success(f"🎉 Successfully captured {len(cad_screenshot_paths)} CAD drawings!")
+                
+                # Display all captured screenshots
+                for i, path in enumerate(cad_screenshot_paths):
+                    st.image(path, caption=f"CAD Drawing {i+1}")
+
+def updated_tab2_section():
+    """
+    Updated wear analysis section with multiple file upload support
+    """
+    st.header("🔍 Advanced Tyre Wear Analysis")
+    st.markdown("Upload multiple tyre wear images for comprehensive AI-powered analysis")
+    
+    wear_image_files = st.file_uploader("Upload Tyre Wear Images", 
+                                      type=["jpg", "png", "jpeg"], 
+                                      accept_multiple_files=True,
+                                      key="wear_image_uploader_multiple")
+    
+    if wear_image_files:
+        st.info(f"📁 {len(wear_image_files)} wear image(s) uploaded")
+        
+        # Display uploaded images
+        cols = st.columns(min(3, len(wear_image_files)))
+        for i, wear_file in enumerate(wear_image_files):
+            with cols[i % 3]:
+                st.image(wear_file, caption=f"Wear Image {i+1}", width=200)
+        
+        if st.button("🔍 Analyze All Wear Patterns", key="analyze_all_wear_btn"):
+            wear_results_list = []
+            temp_image_paths = []
+            
+            with st.spinner("Analyzing multiple tyre wear patterns... Please wait..."):
+                for i, wear_file in enumerate(wear_image_files):
+                    st.info(f"Analyzing image {i+1}/{len(wear_image_files)}")
+                    
+                    # Save uploaded file temporarily
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
+                        tmp_file.write(wear_file.read())
+                        temp_image_path = tmp_file.name
+                        temp_image_paths.append(temp_image_path)
+                    
+                    # Perform comprehensive wear analysis
+                    wear_percentage = analyze_wear_image(temp_image_path)
+                    
+                    if wear_percentage > 0:
+                        wear_results_list.append(st.session_state.get('wear_analysis_results', {}))
+                        st.success(f"✅ Analysis completed for image {i+1}")
+                    else:
+                        st.error(f"❌ Analysis failed for image {i+1}")
+            
+            if wear_results_list:
+                st.session_state['multiple_wear_results'] = wear_results_list
+                st.session_state['wear_image_paths'] = temp_image_paths
+                st.success(f"🎉 Successfully analyzed {len(wear_results_list)} tyre images!")
+
+def updated_tab3_section():
+    """
+    Updated NX section with enhanced manual control
+    """
+    st.header("📐 NX 3D View Capture")
+    st.info("💡 Click the button below to open NX. You will get notifications for each view capture.")
+    
+    if st.button("🚀 Open NX and Capture Views with Manual Control", key="nx_capture_manual_btn"):
+        views = open_nx_and_capture_views_manual("", manual_file_open=True)
 
         if views:
-            st.success("✅ Captured 3D views from NX successfully!")
+            st.success("✅ All 3D views captured successfully from NX!")
             st.session_state['nx_views'] = views
             
-            with st.expander("View Captured Screenshots"):
+            with st.expander("View All Captured Screenshots"):
                 for name, path in views.items():
                     st.image(path, caption=f"{name.capitalize()} View")
         else:
             st.error("Failed to capture 3D views from NX.")
 
-    with tab4:
-        st.header("📄 Generate Enhanced Reports")
+def updated_tab4_section():
+    """
+    Updated report generation section with multiple file support
+    """
+    st.header("📄 Generate Enhanced Reports")
+    
+    pdf_files = st.file_uploader("Upload PDF Files (Specs)", 
+                               type=["pdf"], 
+                               accept_multiple_files=True,
+                               key="pdf_uploader_multiple")
+    excel_files = st.file_uploader("Upload Excel Files (Specifications)", 
+                                 type=["xlsx"], 
+                                 accept_multiple_files=True,
+                                 key="excel_uploader_multiple")
+    
+    # Status indicators
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        cad_status = "✅ Ready" if st.session_state.get('cad_screenshots_captured') else "❌ Not captured"
+        st.info(f"CAD Drawings: {cad_status}")
+    
+    with col2:
+        wear_status = "✅ Analyzed" if st.session_state.get('multiple_wear_results') else "❌ Not analyzed"
+        st.info(f"Wear Analysis: {wear_status}")
+    
+    with col3:
+        nx_status = "✅ Captured" if st.session_state.get('nx_views') else "❌ Not captured"
+        st.info(f"NX Views: {nx_status}")
+    
+    # Generate Report Button
+    if st.button("🚀 Generate Enhanced Report"):
+        missing_items = []
+        if not pdf_files:
+            missing_items.append("PDF files")
+        if not excel_files:
+            missing_items.append("Excel files")
+        if not st.session_state.get('cad_screenshots_captured'):
+            missing_items.append("CAD drawing captures")
+        if not st.session_state.get('multiple_wear_results'):
+            missing_items.append("Wear analysis")
         
-        pdf_file = st.file_uploader("Upload PDF File (Specs)", type=["pdf"])
-        excel_file = st.file_uploader("Upload Excel File (Specifications)", type=["xlsx"])
-        
-        # Status indicators
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            cad_status = "✅ Ready" if st.session_state['cad_screenshot_captured'] else "❌ Not captured"
-            st.info(f"CAD Drawing: {cad_status}")
-        
-        with col2:
-            wear_status = "✅ Analyzed" if st.session_state.get('wear_analysis_results') else "❌ Not analyzed"
-            st.info(f"Wear Analysis: {wear_status}")
-        
-        with col3:
-            nx_status = "✅ Captured" if st.session_state.get('nx_views') else "❌ Not captured"
-            st.info(f"NX Views: {nx_status}")
-        
-        # Generate Report Button
-        if st.button("🚀 Generate Enhanced Report"):
-            # Check required files
-            missing_items = []
-            if not pdf_file:
-                missing_items.append("PDF file")
-            if not excel_file:
-                missing_items.append("Excel file")
-            if not st.session_state['cad_screenshot_captured']:
-                missing_items.append("CAD drawing capture")
-            if not st.session_state.get('wear_analysis_results'):
-                missing_items.append("Wear analysis")
-            
-            if missing_items:
-                st.error(f"Missing required items: {', '.join(missing_items)}")
-                st.info("Please complete all sections before generating the report.")
-            else:
-                # Generate reports
-                with st.spinner("Generating enhanced reports... Please wait..."):
-                    with tempfile.TemporaryDirectory() as tmpdir:
-                        # Save uploaded files
+        if missing_items:
+            st.error(f"Missing required items: {', '.join(missing_items)}")
+            st.info("Please complete all sections before generating the report.")
+        else:
+            # Generate reports with multiple files
+            with st.spinner("Generating enhanced reports with multiple files... Please wait..."):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    # Process multiple PDF files
+                    all_pdf_info = []
+                    for pdf_file in pdf_files:
                         pdf_path = os.path.join(tmpdir, pdf_file.name)
-                        excel_path = os.path.join(tmpdir, excel_file.name)
-                        pptx_path = os.path.join(tmpdir, "Enhanced_Tyre_Report.pptx")
-                        pdf_out_path = os.path.join(tmpdir, "Enhanced_Tyre_Report.pdf")
-
                         with open(pdf_path, "wb") as f:
                             f.write(pdf_file.read())
+                        pdf_info = extract_pdf_info(pdf_path)
+                        all_pdf_info.extend(pdf_info)
+                    
+                    # Process multiple Excel files (combine all data)
+                    combined_excel_df = pd.DataFrame()
+                    for excel_file in excel_files:
+                        excel_path = os.path.join(tmpdir, excel_file.name)
                         with open(excel_path, "wb") as f:
                             f.write(excel_file.read())
-
-                        # Extract data
-                        pdf_info = extract_pdf_info(pdf_path)
                         excel_df = read_excel_data(excel_path)
-                        
-                        # Add wear analysis summary to PDF info
-                        if st.session_state.get('wear_analysis_results'):
-                            wear_summary = f"Comprehensive Wear Analysis: {st.session_state['wear_analysis_results']['wear_percentage']}% worn, Condition: {st.session_state['wear_analysis_results']['condition']}"
-                            pdf_info.append(wear_summary)
+                        combined_excel_df = pd.concat([combined_excel_df, excel_df], ignore_index=True)
+                    
+                    # Get image paths
+                    wear_image_paths = st.session_state.get('wear_image_paths', [])
+                    cad_screenshot_paths = st.session_state.get('cad_screenshot_paths', [])
+                    
+                    # Output paths
+                    pptx_path = os.path.join(tmpdir, "Enhanced_Tyre_Report.pptx")
+                    pdf_out_path = os.path.join(tmpdir, "Enhanced_Tyre_Report.pdf")
+                    
+                    # Generate reports
+                    generate_pdf(all_pdf_info, combined_excel_df, wear_image_paths, cad_screenshot_paths, pdf_out_path)
+                    generate_pptx(all_pdf_info, combined_excel_df, wear_image_paths, cad_screenshot_paths, pptx_path)
+                    
+                    # Download buttons
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        with open(pdf_out_path, "rb") as f:
+                            st.download_button(
+                                "📄 Download Enhanced PDF Report", 
+                                f, 
+                                file_name="Enhanced_Tyre_Report.pdf", 
+                                mime="application/pdf"
+                            )
 
-                        # Get paths for images
-                        wear_image_path = None
-                        if st.session_state.get('wear_analysis_results'):
-                            # Use original image path if available
-                            wear_image_path = st.session_state['wear_analysis_results'].get('original_image_path')
-                        
-                        cad_screenshot_path = st.session_state['cad_screenshot_path']
-
-                        # Generate reports
-                        generate_pdf(pdf_info, excel_df, wear_image_path, cad_screenshot_path, pdf_out_path)
-                        generate_pptx(pdf_info, excel_df, wear_image_path, cad_screenshot_path, pptx_path)
-
-                        # Download buttons
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            with open(pdf_out_path, "rb") as f:
-                                st.download_button(
-                                    "📄 Download Enhanced PDF Report", 
-                                    f, 
-                                    file_name="Enhanced_Tyre_Report.pdf", 
-                                    mime="application/pdf"
-                                )
-
-                        with col2:
-                            with open(pptx_path, "rb") as f:
-                                st.download_button(
-                                    "📊 Download Enhanced PPT Report", 
-                                    f, 
-                                    file_name="Enhanced_Tyre_Report.pptx", 
-                                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
-                                )
-                
-                st.success("🎉 Enhanced reports generated successfully!")
+                    with col2:
+                        with open(pptx_path, "rb") as f:
+                            st.download_button(
+                                "📊 Download Enhanced PPT Report", 
+                                f, 
+                                file_name="Enhanced_Tyre_Report.pptx", 
+                                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                            )
+            
+            st.success("🎉 Enhanced reports with multiple files generated successfully!")
 
 # ---------- RUN THE APPLICATION ----------
 if __name__ == "__main__":
