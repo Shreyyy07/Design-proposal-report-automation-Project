@@ -7,8 +7,8 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer, Image
 from reportlab.lib.styles import getSampleStyleSheet
-from pptx import Presentation
-from pptx.util import Inches
+# from pptx import Presentation
+# from pptx.util import Inches
 import os
 import subprocess
 import pyautogui
@@ -29,33 +29,25 @@ def is_tyre_image(image_path):
     Returns True if it's likely a tyre image, False otherwise
     """
     try:
-        # Load the image
         img = cv2.imread(image_path)
         if img is None:
             return False
         
-        # Convert to grayscale
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         height, width = gray.shape
         
-        # 1. Check for predominantly dark/rubber-like colors
         mean_intensity = np.mean(gray)
-        # Tyres are generally darker (rubber is dark)
-        is_dark_enough = mean_intensity < 180  # Tyres should be darker than flowcharts/documents
+        is_dark_enough = mean_intensity < 180  
         
-        # 2. Check for circular/curved patterns (tyres have curved edges)
         circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, 1, min(height, width)//4,
                                  param1=50, param2=30, minRadius=min(height, width)//8, 
                                  maxRadius=min(height, width)//2)
         has_curves = circles is not None and len(circles[0]) > 0 if circles is not None else False
         
-        # 3. Check edge characteristics (tyres have many irregular edges from tread)
         edges = cv2.Canny(gray, 50, 150)
         edge_density = np.sum(edges) / edges.size
-        has_good_edges = edge_density > 0.15  # Tyres have dense edge patterns
+        has_good_edges = edge_density > 0.15 
         
-        # 4. Check for regular geometric shapes (flowcharts have rectangles/boxes)
-        # Detect rectangles/squares which are common in flowcharts but not in tyres
         contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         rectangular_shapes = 0
         for cnt in contours:
@@ -63,39 +55,32 @@ def is_tyre_image(image_path):
             if len(approx) == 4:  # Rectangle/square
                 rectangular_shapes += 1
         
-        # Flowcharts/diagrams have many rectangular shapes, tyres don't
         has_too_many_rectangles = rectangular_shapes > 10
         
-        # 5. Color distribution check (tyres are mostly black/dark gray)
         hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
-        # Check if most pixels are in the darker range (0-100)
         dark_pixels = np.sum(hist[0:100])
         total_pixels = height * width
         dark_ratio = dark_pixels / total_pixels
-        is_predominantly_dark = dark_ratio > 0.3  # At least 30% dark pixels for tyres
+        is_predominantly_dark = dark_ratio > 0.3 
         
-        # 6. Text detection (flowcharts often contain text, tyres usually don't have readable text)
-        # Simple text detection using high contrast regions
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         text_like_regions = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, 
                                            cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
         white_pixels = np.sum(text_like_regions == 255)
         white_ratio = white_pixels / total_pixels
-        has_too_much_text = white_ratio > 0.6  # Documents/flowcharts have lots of white/text areas
+        has_too_much_text = white_ratio > 0.6  
         
-        # Scoring system - tyres should meet multiple criteria
         tyre_indicators = [
             is_dark_enough,
             has_curves,
             has_good_edges,
             is_predominantly_dark,
-            not has_too_many_rectangles,  # Tyres shouldn't have many rectangles
-            not has_too_much_text  # Tyres shouldn't have lots of text/white areas
+            not has_too_many_rectangles,  
+            not has_too_much_text  
         ]
         
         tyre_score = sum(tyre_indicators)
         
-        # Debug info (you can remove this later)
         print(f"Tyre validation scores:")
         print(f"- Dark enough: {is_dark_enough} (mean: {mean_intensity:.1f})")
         print(f"- Has curves: {has_curves}")
@@ -105,7 +90,6 @@ def is_tyre_image(image_path):
         print(f"- White ratio: {white_ratio:.3f} (too much: {has_too_much_text})")
         print(f"- Total score: {tyre_score}/6")
         
-        # Tyres should score at least 4 out of 6 criteria
         return tyre_score >= 4
         
     except Exception as e:
@@ -119,31 +103,22 @@ def analyze_comprehensive_wear(image_path):
     Returns detailed wear information including percentage, condition, and recommendations
     """
     try:
-        # Load and preprocess the image
         img = cv2.imread(image_path)
         if img is None:
             return {"error": "Could not load image"}
         
-        # Convert to grayscale
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         
-        # Get image dimensions
         height, width = gray.shape
         
-        # Step 1: Preprocessing and noise reduction
-        # Apply Gaussian blur to reduce noise
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         
-        # Step 2: Tread pattern detection using multiple techniques
         wear_analysis = analyze_tread_patterns(blurred)
         
-        # Step 3: Calculate overall wear percentage
         wear_percentage = calculate_wear_percentage(wear_analysis)
         
-        # Step 4: Determine condition and remaining life
         condition_info = determine_condition(wear_percentage)
         
-        # Step 5: Generate wear visualization
         wear_map_path = generate_wear_visualization(image_path, wear_analysis, wear_percentage)
         
         return {
@@ -169,39 +144,29 @@ def analyze_tread_patterns(gray_img):
     """
     Analyze tread patterns to determine wear level
     """
-    # Edge detection to find groove patterns
     edges = cv2.Canny(gray_img, 50, 150)
     
-    # Morphological operations to enhance groove patterns
     kernel = np.ones((3, 3), np.uint8)
     edges_enhanced = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
     
-    # Detect horizontal lines (typical tread patterns)
     horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 1))
     horizontal_lines = cv2.morphologyEx(edges_enhanced, cv2.MORPH_OPEN, horizontal_kernel)
     
-    # Detect vertical grooves
     vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 25))
     vertical_lines = cv2.morphologyEx(edges_enhanced, cv2.MORPH_OPEN, vertical_kernel)
     
-    # Combine patterns
     combined_patterns = cv2.add(horizontal_lines, vertical_lines)
     
-    # Analyze groove characteristics
     contours, _ = cv2.findContours(combined_patterns, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    # Calculate groove metrics
     groove_count = len(contours)
     groove_areas = [cv2.contourArea(cnt) for cnt in contours if cv2.contourArea(cnt) > 50]
     avg_groove_width = np.mean(groove_areas) if groove_areas else 0
     
-    # Tread depth analysis using intensity gradients
     tread_depth_score = analyze_tread_depth(gray_img)
     
-    # Pattern integrity (how regular/uniform the pattern is)
     pattern_integrity = calculate_pattern_integrity(combined_patterns)
     
-    # Pattern regularity (consistency across the tyre)
     pattern_regularity = calculate_pattern_regularity(combined_patterns)
     
     return {
@@ -217,14 +182,11 @@ def analyze_tread_depth(gray_img):
     """
     Analyze tread depth using intensity gradients and shadows
     """
-    # Calculate gradients to find depth changes
     grad_x = cv2.Sobel(gray_img, cv2.CV_64F, 1, 0, ksize=3)
     grad_y = cv2.Sobel(gray_img, cv2.CV_64F, 0, 1, ksize=3)
     
-    # Calculate gradient magnitude
     gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
     
-    # Normalize and calculate depth score
     depth_score = np.mean(gradient_magnitude) / 255.0 * 100
     
     return depth_score
@@ -233,7 +195,6 @@ def calculate_pattern_integrity(pattern_img):
     """
     Calculate how intact the tread pattern is
     """
-    # Count non-zero pixels (pattern areas)
     pattern_pixels = np.count_nonzero(pattern_img)
     total_pixels = pattern_img.size
     
@@ -246,7 +207,6 @@ def calculate_pattern_regularity(pattern_img):
     """
     height, width = pattern_img.shape
     
-    # Divide image into sections and analyze consistency
     sections = []
     section_height = height // 4
     section_width = width // 4
@@ -258,7 +218,6 @@ def calculate_pattern_regularity(pattern_img):
             section_density = np.count_nonzero(section) / section.size
             sections.append(section_density)
     
-    # Calculate standard deviation (lower = more regular)
     regularity = 100 - (np.std(sections) * 1000)  # Scale appropriately
     return max(0, min(100, regularity))
 
@@ -266,7 +225,6 @@ def calculate_wear_percentage(analysis):
     """
     Calculate overall wear percentage based on multiple factors
     """
-    # Weight different factors
     weights = {
         'tread_depth': 0.4,
         'pattern_integrity': 0.3,
@@ -274,13 +232,11 @@ def calculate_wear_percentage(analysis):
         'regularity': 0.1
     }
     
-    # Normalize scores (higher scores = less wear)
     tread_score = min(100, analysis['tread_depth_score'])
     integrity_score = analysis['pattern_integrity']
     groove_score = min(100, analysis['groove_count'] * 2)  # Adjust multiplier as needed
     regularity_score = analysis['pattern_regularity']
     
-    # Calculate weighted average of "good condition" scores
     good_condition_score = (
         weights['tread_depth'] * tread_score +
         weights['pattern_integrity'] * integrity_score +
@@ -288,7 +244,6 @@ def calculate_wear_percentage(analysis):
         weights['regularity'] * regularity_score
     )
     
-    # Convert to wear percentage (inverse of good condition)
     wear_percentage = 100 - good_condition_score
     
     # Ensure reasonable bounds
@@ -587,8 +542,6 @@ def open_autocad_and_capture_screenshot(dwg_path):
         # Take full screen screenshot first
         screenshot = pyautogui.screenshot()
 
-        # UPDATED: Crop only the drawing area (excluding toolbars, ribbons, command line)
-        # These coordinates target the main drawing viewport area in AutoCAD
         screen_width, screen_height = pyautogui.size()
         
         # More precise cropping for drawing area only
@@ -714,9 +667,7 @@ def open_nx_and_capture_views_manual(prt_file_path="", manual_file_open=True):
             
             # UPDATED: Capture only the 3D viewport area (not entire NX window)
             screenshot = pyautogui.screenshot()
-            
-            # Crop to NX viewport only (excluding menus, toolbars, etc.)
-            # These coordinates target the main 3D viewport in NX
+
             left = screen_width * 0.12   # Remove left toolbar area
             top = screen_height * 0.12   # Remove ribbon and title bar
             right = screen_width * 0.88  # Remove right panels
@@ -904,138 +855,6 @@ def generate_pdf(pdf_info, excel_df, image_paths, cad_image_paths, output_path):
                 elements.append(Spacer(1, 10))
 
     doc.build(elements)
-
-    # ---------- UPDATED PPTX Report Generator ----------
-def generate_pptx(pdf_info, excel_df, image_paths, cad_image_paths, output_path):
-    """
-    UPDATED: Enhanced PPTX generation with proper titles and multiple file support
-    """
-    prs = Presentation()
-    
-    # Slide 1: Title slide
-    slide1 = prs.slides.add_slide(prs.slide_layouts[0])
-    slide1.shapes.title.text = "Enhanced Tyre Design Proposal Report"
-    slide1.placeholders[1].text = "Generated using Streamlit + Advanced Computer Vision"
-
-    # Slide 2: PDF Content
-    slide2 = prs.slides.add_slide(prs.slide_layouts[1])
-    slide2.shapes.title.text = "PDF Content (Specs)"
-    # Filter out the wear analysis summary from PDF content
-    filtered_pdf_info = [info for info in pdf_info if not info.startswith("Comprehensive Wear Analysis:")]
-    tf = slide2.placeholders[1].text_frame
-    tf.text = "\n--- PAGE SPLIT ---\n".join(filtered_pdf_info)
-
-    # Slide 3: Enhanced Wear Analysis Summary with Original Images
-    if 'wear_analysis_results' in st.session_state and st.session_state['wear_analysis_results']:
-        wear_results = st.session_state['wear_analysis_results']
-        
-        # Create slide with blank layout and add title manually
-        slide3 = prs.slides.add_slide(prs.slide_layouts[6])  # Blank layout
-        
-        # Add title manually
-        title_shape = slide3.shapes.add_textbox(Inches(1), Inches(0.5), Inches(8), Inches(1))
-        title_frame = title_shape.text_frame
-        title_frame.text = "Comprehensive Wear Analysis"
-        title_para = title_frame.paragraphs[0]
-        title_para.font.size = Inches(0.4)
-        title_para.font.bold = True
-        
-        # Add multiple wear analysis images if available
-        current_y = Inches(1.5)
-        image_count = 0
-        
-        for i, image_path in enumerate(image_paths):
-            if image_path and os.path.exists(image_path) and image_count < 2:  # Limit to 2 images per slide
-                slide3.shapes.add_picture(image_path, Inches(0.5 + (image_count * 4.5)), current_y, 
-                                        width=Inches(4), height=Inches(3))
-                image_count += 1
-        
-        # Add text box with analysis results
-        textbox = slide3.shapes.add_textbox(Inches(1), Inches(5), Inches(8), Inches(2))
-        text_frame = textbox.text_frame
-        
-        # Create wear analysis content
-        wear_content = f"""Wear Analysis Results:
-• Wear Percentage: {wear_results['wear_percentage']}%
-• Condition: {wear_results['condition']}
-• Safety Status: {wear_results['safety_status']}
-• Remaining Life: {wear_results['remaining_life_months']} months
-
-Recommendations: {wear_results['recommendations']}"""
-        
-        text_frame.text = wear_content
-
-    # Slide 4: CAD Screenshots (Multiple)
-    if cad_image_paths:
-        slide4 = prs.slides.add_slide(prs.slide_layouts[6])  # Blank layout
-        
-        # Add title manually
-        title_shape = slide4.shapes.add_textbox(Inches(1), Inches(0.5), Inches(8), Inches(1))
-        title_frame = title_shape.text_frame
-        title_frame.text = "2D CAD File Screenshots"
-        title_para = title_frame.paragraphs[0]
-        title_para.font.size = Inches(0.4)
-        title_para.font.bold = True
-        
-        # Add CAD images in a grid
-        images_per_row = 2
-        current_row = 0
-        current_col = 0
-        
-        for i, cad_path in enumerate(cad_image_paths):
-            if cad_path and os.path.exists(cad_path):
-                x_pos = Inches(0.5 + (current_col * 4.5))
-                y_pos = Inches(1.5 + (current_row * 2.5))
-                
-                slide4.shapes.add_picture(cad_path, x_pos, y_pos, width=Inches(4), height=Inches(2))
-                
-                current_col += 1
-                if current_col >= images_per_row:
-                    current_col = 0
-                    current_row += 1
-
-    # Slide 5: Excel Specifications
-    if not excel_df.empty:
-        slide5 = prs.slides.add_slide(prs.slide_layouts[6])  # Blank layout
-        
-        # Add title manually
-        title_shape = slide5.shapes.add_textbox(Inches(1), Inches(0.5), Inches(8), Inches(1))
-        title_frame = title_shape.text_frame
-        title_frame.text = "Tyre Specifications"
-        title_para = title_frame.paragraphs[0]
-        title_para.font.size = Inches(0.4)
-        title_para.font.bold = True
-        
-        rows, cols = excel_df.shape
-        table = slide5.shapes.add_table(rows+1, cols, Inches(0.5), Inches(1.5), 
-                                       Inches(8.5), Inches(0.8 + rows * 0.3)).table
-        for i, col in enumerate(excel_df.columns):
-            table.cell(0, i).text = str(col)
-        for r in range(rows):
-            for c in range(cols):
-                table.cell(r+1, c).text = str(excel_df.iloc[r, c])
-
-    # Slide 6: NX 3D Model Views
-    if 'nx_views' in st.session_state and st.session_state['nx_views']:
-        slide6 = prs.slides.add_slide(prs.slide_layouts[6])  # Blank layout
-        
-        # Add title manually
-        title_shape = slide6.shapes.add_textbox(Inches(1), Inches(0.5), Inches(8), Inches(1))
-        title_frame = title_shape.text_frame
-        title_frame.text = "NX 3D Model Views"
-        title_para = title_frame.paragraphs[0]
-        title_para.font.size = Inches(0.4)
-        title_para.font.bold = True
-        
-        left = Inches(0.5)
-        top = Inches(1.5)
-        for i, (view, path) in enumerate(st.session_state['nx_views'].items()):
-            if os.path.exists(path):
-                slide6.shapes.add_picture(path, left + Inches((i % 2) * 4.5), 
-                                        top + Inches((i // 2) * 2.5), width=Inches(4))
-
-    prs.save(output_path)
-
 
 # ---------- ENHANCED STREAMLIT GUI ----------
 def main():
@@ -1230,7 +1049,7 @@ def updated_tab4_section():
             st.info("Please complete all sections before generating the report.")
         else:
             # Generate reports with multiple files
-            with st.spinner("Generating enhanced reports with multiple files... Please wait..."):
+            with st.spinner("Generating enhanced PDF report... Please wait..."):
                 with tempfile.TemporaryDirectory() as tmpdir:
                     # Process multiple PDF files
                     all_pdf_info = []
@@ -1254,35 +1073,22 @@ def updated_tab4_section():
                     wear_image_paths = st.session_state.get('wear_image_paths', [])
                     cad_screenshot_paths = st.session_state.get('cad_screenshot_paths', [])
                     
-                    # Output paths
-                    pptx_path = os.path.join(tmpdir, "Enhanced_Tyre_Report.pptx")
+                    # Output path for PDF only
                     pdf_out_path = os.path.join(tmpdir, "Enhanced_Tyre_Report.pdf")
                     
-                    # Generate reports
+                    # Generate PDF report only
                     generate_pdf(all_pdf_info, combined_excel_df, wear_image_paths, cad_screenshot_paths, pdf_out_path)
-                    generate_pptx(all_pdf_info, combined_excel_df, wear_image_paths, cad_screenshot_paths, pptx_path)
                     
-                    # Download buttons
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        with open(pdf_out_path, "rb") as f:
-                            st.download_button(
-                                "📄 Download Enhanced PDF Report", 
-                                f, 
-                                file_name="Enhanced_Tyre_Report.pdf", 
-                                mime="application/pdf"
-                            )
-
-                    with col2:
-                        with open(pptx_path, "rb") as f:
-                            st.download_button(
-                                "📊 Download Enhanced PPT Report", 
-                                f, 
-                                file_name="Enhanced_Tyre_Report.pptx", 
-                                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
-                            )
+                    # Download button for PDF only
+                    with open(pdf_out_path, "rb") as f:
+                        st.download_button(
+                            "📄 Download Enhanced PDF Report", 
+                            f, 
+                            file_name="Enhanced_Tyre_Report.pdf", 
+                            mime="application/pdf"
+                        )
             
-            st.success("🎉 Enhanced reports with multiple files generated successfully!")
+            st.success("Enhanced PDF report generated successfully!")
 
 # ---------- RUN THE APPLICATION ----------
 if __name__ == "__main__":
