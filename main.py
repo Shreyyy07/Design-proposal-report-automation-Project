@@ -20,6 +20,46 @@ import numpy as np
 import matplotlib.pyplot as plt
 from skimage import measure, morphology, filters
 from scipy import ndimage
+import base64
+from io import BytesIO
+
+def get_apollo_logo_base64():
+    """
+    Convert the Apollo Tyres logo to base64 for embedding
+    You'll need to save your logo image as 'apollo_logo.png' in the same directory
+    """
+    try:
+        with open("apollo_logo.png", "rb") as img_file:
+            return base64.b64encode(img_file.read()).decode()
+    except FileNotFoundError:
+        # Fallback if logo file not found
+        return None
+
+def add_logo_to_streamlit():
+    """
+    Add Apollo Tyres logo to Streamlit UI at the top center
+    """
+    logo_base64 = get_apollo_logo_base64()
+    if logo_base64:
+        st.markdown(
+            f"""
+            <div style="display: flex; justify-content: center; margin-bottom: 20px;">
+                <img src="data:image/png;base64,{logo_base64}" width="200" alt="Apollo Tyres Logo">
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    else:
+        # Fallback text logo if image not found
+        st.markdown(
+            """
+            <div style="text-align: center; margin-bottom: 20px;">
+                <h2 style="color: #8A2BE2; margin: 0;">🏎️ APOLLO TYRES LTD</h2>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
 
 # ---------- ENHANCED TYRE WEAR ANALYSIS FUNCTIONS (NEW) ----------
 
@@ -750,6 +790,23 @@ def generate_pdf(pdf_info, excel_df, image_paths, cad_image_paths, output_path):
                           topMargin=72, bottomMargin=72, leftMargin=72, rightMargin=72)
     styles = getSampleStyleSheet()
     elements = []
+
+        # Add Apollo Tyres Logo at the top center
+    try:
+        if os.path.exists("apollo_logo.png"):
+            logo = Image("apollo_logo.png", width=150, height=75)  # Adjust size as needed
+            logo.hAlign = 'CENTER'
+            elements.append(logo)
+            elements.append(Spacer(1, 20))
+        else:
+            # Fallback company header if logo not found
+            elements.append(Paragraph("<b>APOLLO TYRES LTD</b>", styles["Title"]))
+            elements.append(Spacer(1, 10))
+    except Exception as e:
+        # Fallback text header
+        elements.append(Paragraph("<b>APOLLO TYRES LTD</b>", styles["Title"]))
+        elements.append(Spacer(1, 10))
+
     
     # Title
     elements.append(Paragraph("<b>Enhanced Tyre Design Proposal Report</b>", styles["Title"]))
@@ -861,8 +918,11 @@ def main():
     """
     Main Streamlit application with enhanced wear analysis and multiple file support
     """
-    st.title("🛞 Enhanced Tyre Report Generator with Advanced Wear Analysis")
-    st.markdown("*Features: Multiple PDF/Excel files, Multiple CAD captures, Multiple wear images, NX 3D views, and AI-powered analysis*")
+    # Add logo at the top center
+    add_logo_to_streamlit()
+
+    st.title("Enhanced Tyre Report Generator")
+
 
     # Initialize session state
     initialize_session_state()
