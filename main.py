@@ -60,475 +60,24 @@ def add_logo_to_streamlit():
             unsafe_allow_html=True
         )
 
-
-# ---------- ENHANCED TYRE WEAR ANALYSIS FUNCTIONS (NEW) ----------
-
-def is_tyre_image(image_path):
-    """
-    Enhanced validation to ensure uploaded image is actually a tyre image
-    Returns True if it's likely a tyre image, False otherwise
-    """
-    try:
-        img = cv2.imread(image_path)
-        if img is None:
-            return False
-        
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        height, width = gray.shape
-        
-        mean_intensity = np.mean(gray)
-        is_dark_enough = mean_intensity < 180  
-        
-        circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, 1, min(height, width)//4,
-                                 param1=50, param2=30, minRadius=min(height, width)//8, 
-                                 maxRadius=min(height, width)//2)
-        has_curves = circles is not None and len(circles[0]) > 0 if circles is not None else False
-        
-        edges = cv2.Canny(gray, 50, 150)
-        edge_density = np.sum(edges) / edges.size
-        has_good_edges = edge_density > 0.15 
-        
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        rectangular_shapes = 0
-        for cnt in contours:
-            approx = cv2.approxPolyDP(cnt, 0.02 * cv2.arcLength(cnt, True), True)
-            if len(approx) == 4:  # Rectangle/square
-                rectangular_shapes += 1
-        
-        has_too_many_rectangles = rectangular_shapes > 10
-        
-        hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
-        dark_pixels = np.sum(hist[0:100])
-        total_pixels = height * width
-        dark_ratio = dark_pixels / total_pixels
-        is_predominantly_dark = dark_ratio > 0.3 
-        
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        text_like_regions = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, 
-                                           cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
-        white_pixels = np.sum(text_like_regions == 255)
-        white_ratio = white_pixels / total_pixels
-        has_too_much_text = white_ratio > 0.6  
-        
-        tyre_indicators = [
-            is_dark_enough,
-            has_curves,
-            has_good_edges,
-            is_predominantly_dark,
-            not has_too_many_rectangles,  
-            not has_too_much_text  
-        ]
-        
-        tyre_score = sum(tyre_indicators)
-        
-        print(f"Tyre validation scores:")
-        print(f"- Dark enough: {is_dark_enough} (mean: {mean_intensity:.1f})")
-        print(f"- Has curves: {has_curves}")
-        print(f"- Good edges: {has_good_edges} (density: {edge_density:.3f})")
-        print(f"- Predominantly dark: {is_predominantly_dark} (ratio: {dark_ratio:.3f})")
-        print(f"- Rectangles: {rectangular_shapes} (too many: {has_too_many_rectangles})")
-        print(f"- White ratio: {white_ratio:.3f} (too much: {has_too_much_text})")
-        print(f"- Total score: {tyre_score}/6")
-        
-        return tyre_score >= 4
-        
-    except Exception as e:
-        print(f"Tyre validation error: {e}")
-        return False
-
-
-def analyze_comprehensive_wear(image_path):
-    """
-    Comprehensive tyre wear analysis using Computer Vision
-    Returns detailed wear information including percentage, condition, and recommendations
-    """
-    try:
-        img = cv2.imread(image_path)
-        if img is None:
-            return {"error": "Could not load image"}
-        
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        
-        height, width = gray.shape
-        
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        
-        wear_analysis = analyze_tread_patterns(blurred)
-        
-        wear_percentage = calculate_wear_percentage(wear_analysis)
-        
-        condition_info = determine_condition(wear_percentage)
-        
-        wear_map_path = generate_wear_visualization(image_path, wear_analysis, wear_percentage)
-        
-        return {
-            'wear_percentage': round(wear_percentage, 1),
-            'condition': condition_info['condition'],
-            'remaining_life_months': condition_info['remaining_months'],
-            'safety_status': condition_info['safety_status'],
-            'recommendations': condition_info['recommendations'],
-            'tread_depth_score': wear_analysis['tread_depth_score'],
-            'pattern_integrity': wear_analysis['pattern_integrity'],
-            'wear_map_path': wear_map_path,
-            'analysis_details': {
-                'groove_count': wear_analysis['groove_count'],
-                'average_groove_width': wear_analysis['avg_groove_width'],
-                'pattern_regularity': wear_analysis['pattern_regularity']
-            }
-        }
-        
-    except Exception as e:
-        return {"error": f"Analysis failed: {str(e)}"}
-
-def analyze_tread_patterns(gray_img):
-    """
-    Analyze tread patterns to determine wear level
-    """
-    edges = cv2.Canny(gray_img, 50, 150)
-    
-    kernel = np.ones((3, 3), np.uint8)
-    edges_enhanced = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
-    
-    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 1))
-    horizontal_lines = cv2.morphologyEx(edges_enhanced, cv2.MORPH_OPEN, horizontal_kernel)
-    
-    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 25))
-    vertical_lines = cv2.morphologyEx(edges_enhanced, cv2.MORPH_OPEN, vertical_kernel)
-    
-    combined_patterns = cv2.add(horizontal_lines, vertical_lines)
-    
-    contours, _ = cv2.findContours(combined_patterns, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    groove_count = len(contours)
-    groove_areas = [cv2.contourArea(cnt) for cnt in contours if cv2.contourArea(cnt) > 50]
-    avg_groove_width = np.mean(groove_areas) if groove_areas else 0
-    
-    tread_depth_score = analyze_tread_depth(gray_img)
-    
-    pattern_integrity = calculate_pattern_integrity(combined_patterns)
-    
-    pattern_regularity = calculate_pattern_regularity(combined_patterns)
-    
-    return {
-        'groove_count': groove_count,
-        'avg_groove_width': avg_groove_width,
-        'tread_depth_score': tread_depth_score,
-        'pattern_integrity': pattern_integrity,
-        'pattern_regularity': pattern_regularity,
-        'edge_density': np.sum(edges_enhanced) / edges_enhanced.size
-    }
-
-def analyze_tread_depth(gray_img):
-    """
-    Analyze tread depth using intensity gradients and shadows
-    """
-    grad_x = cv2.Sobel(gray_img, cv2.CV_64F, 1, 0, ksize=3)
-    grad_y = cv2.Sobel(gray_img, cv2.CV_64F, 0, 1, ksize=3)
-    
-    gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
-    
-    depth_score = np.mean(gradient_magnitude) / 255.0 * 100
-    
-    return depth_score
-
-def calculate_pattern_integrity(pattern_img):
-    """
-    Calculate how intact the tread pattern is
-    """
-    pattern_pixels = np.count_nonzero(pattern_img)
-    total_pixels = pattern_img.size
-    
-    integrity_score = (pattern_pixels / total_pixels) * 100
-    return integrity_score
-
-def calculate_pattern_regularity(pattern_img):
-    """
-    Calculate pattern regularity across different sections
-    """
-    height, width = pattern_img.shape
-    
-    sections = []
-    section_height = height // 4
-    section_width = width // 4
-    
-    for i in range(4):
-        for j in range(4):
-            section = pattern_img[i*section_height:(i+1)*section_height, 
-                                j*section_width:(j+1)*section_width]
-            section_density = np.count_nonzero(section) / section.size
-            sections.append(section_density)
-    
-    regularity = 100 - (np.std(sections) * 1000)  # Scale appropriately
-    return max(0, min(100, regularity))
-
-def calculate_wear_percentage(analysis):
-    """
-    Calculate overall wear percentage based on multiple factors
-    """
-    weights = {
-        'tread_depth': 0.4,
-        'pattern_integrity': 0.3,
-        'groove_density': 0.2,
-        'regularity': 0.1
-    }
-    
-    tread_score = min(100, analysis['tread_depth_score'])
-    integrity_score = analysis['pattern_integrity']
-    groove_score = min(100, analysis['groove_count'] * 2)  # Adjust multiplier as needed
-    regularity_score = analysis['pattern_regularity']
-    
-    good_condition_score = (
-        weights['tread_depth'] * tread_score +
-        weights['pattern_integrity'] * integrity_score +
-        weights['groove_density'] * groove_score +
-        weights['regularity'] * regularity_score
-    )
-    
-    wear_percentage = 100 - good_condition_score
-    
-    # Ensure reasonable bounds
-    return max(0, min(100, wear_percentage))
-
-def determine_condition(wear_percentage):
-    """
-    Determine tyre condition and provide recommendations
-    """
-    if wear_percentage <= 25:
-        condition = "Excellent"
-        safety_status = "Safe"
-        remaining_months = 24
-        recommendations = "Tyre is in excellent condition. Continue regular maintenance and rotation."
-        
-    elif wear_percentage <= 50:
-        condition = "Good"
-        safety_status = "Safe"
-        remaining_months = 12
-        recommendations = "Tyre is in good condition. Monitor wear patterns and consider rotation."
-        
-    elif wear_percentage <= 75:
-        condition = "Fair"
-        safety_status = "Caution"
-        remaining_months = 6
-        recommendations = "Tyre shows moderate wear. Plan for replacement within 6 months. Check alignment."
-        
-    else:
-        condition = "Poor"
-        safety_status = "Replace Soon"
-        remaining_months = 1
-        recommendations = "Tyre requires immediate replacement. Unsafe for continued use."
-    
-    return {
-        'condition': condition,
-        'safety_status': safety_status,
-        'remaining_months': remaining_months,
-        'recommendations': recommendations
-    }
-
-def generate_wear_visualization(original_image_path, analysis, wear_percentage):
-    """
-    Generate a visual wear map similar to the reference image
-    """
-    try:
-        # Create visualization
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(12, 8))
-        
-        # Original image
-        original_img = cv2.imread(original_image_path)
-        original_rgb = cv2.cvtColor(original_img, cv2.COLOR_BGR2RGB)
-        
-        # Create wear level representations
-        wear_levels = [0, 25, 50, 75]
-        colors = ['green', 'yellow', 'orange', 'red']
-        
-        # Determine current wear level
-        current_level = min(3, int(wear_percentage // 25))
-        
-        axes = [ax1, ax2, ax3, ax4]
-        
-        for i, (level, color, ax) in enumerate(zip(wear_levels, colors, axes)):
-            # Create a representation for each wear level
-            wear_img = create_wear_level_image(original_rgb, level, color)
-            ax.imshow(wear_img)
-            
-            # Highlight current level
-            if i == current_level:
-                ax.set_title(f"{level}% - CURRENT ({wear_percentage:.1f}%)", 
-                           fontweight='bold', color='red', fontsize=12)
-                ax.add_patch(plt.Rectangle((0, 0), wear_img.shape[1], wear_img.shape[0], 
-                                         fill=False, edgecolor='red', linewidth=3))
-            else:
-                ax.set_title(f"{level}%", fontsize=10)
-            
-            ax.axis('off')
-        
-        plt.tight_layout()
-        plt.suptitle(f"Tyre Wear Analysis - {wear_percentage:.1f}% Worn", 
-                    fontsize=14, fontweight='bold', y=0.98)
-        
-        # Save visualization
-        output_path = os.path.join(tempfile.gettempdir(), "wear_analysis_visualization.png")
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        plt.close()
-        
-        return output_path
-        
-    except Exception as e:
-        print(f"Visualization error: {e}")
-        return None
-
-def create_wear_level_image(original_img, wear_level, color):
-    """
-    Create a visual representation of specific wear level
-    """
-    # Create a copy of the original image
-    wear_img = original_img.copy()
-    
-    # Apply wear effect based on level
-    if wear_level > 0:
-        # Create wear mask
-        gray = cv2.cvtColor(wear_img, cv2.COLOR_RGB2GRAY)
-        
-        # Simulate wear by reducing contrast and adding noise
-        wear_factor = wear_level / 100.0
-        
-        # Reduce tread definition
-        blurred = cv2.GaussianBlur(wear_img, (int(wear_factor * 10) + 1, int(wear_factor * 10) + 1), 0)
-        wear_img = cv2.addWeighted(wear_img, 1 - wear_factor * 0.7, blurred, wear_factor * 0.7, 0)
-        
-        # Add color tint based on wear level
-        color_map = {'green': [0, 255, 0], 'yellow': [255, 255, 0], 
-                    'orange': [255, 165, 0], 'red': [255, 0, 0]}
-        
-        if color in color_map:
-            tint = np.full_like(wear_img, color_map[color], dtype=np.uint8)
-            wear_img = cv2.addWeighted(wear_img, 0.8, tint, 0.2, 0)
-    
-    return wear_img
-
-def display_wear_analysis_results(result):
-    """
-    Display comprehensive wear analysis results in Streamlit
-    """
-    st.subheader("🔍 Comprehensive Tyre Wear Analysis")
-    
-    # Create columns for better layout
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.metric(
-            label="Wear Percentage", 
-            value=f"{result['wear_percentage']}%",
-            delta=f"{100 - result['wear_percentage']:.1f}% remaining"
-        )
-    
-    with col2:
-        st.metric(
-            label="Condition", 
-            value=result['condition']
-        )
-    
-    with col3:
-        st.metric(
-            label="Est. Life Remaining", 
-            value=f"{result['remaining_life_months']} months"
-        )
-    
-    # Safety status with color coding
-    safety_color = {
-        "Safe": "🟢",
-        "Caution": "🟡", 
-        "Replace Soon": "🔴"
-    }
-    
-    st.info(f"{safety_color.get(result['safety_status'], '⚪')} **Safety Status:** {result['safety_status']}")
-    
-    # Detailed analysis in expandable section
-    with st.expander("📊 Detailed Analysis"):
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.write("**Tread Analysis:**")
-            st.write(f"- Tread Depth Score: {result['tread_depth_score']:.1f}")
-            st.write(f"- Pattern Integrity: {result['pattern_integrity']:.1f}%")
-            st.write(f"- Groove Count: {result['analysis_details']['groove_count']}")
-        
-        with col2:
-            st.write("**Pattern Analysis:**")
-            st.write(f"- Pattern Regularity: {result['analysis_details']['pattern_regularity']:.1f}%")
-            st.write(f"- Average Groove Width: {result['analysis_details']['average_groove_width']:.1f}")
-    
-    # Recommendations
-    st.warning(f"**Recommendations:** {result['recommendations']}")
-    
-    # Display wear visualization if available
-    if result.get('wear_map_path') and os.path.exists(result['wear_map_path']):
-        st.subheader("🗺️ Wear Pattern Visualization")
-        st.image(result['wear_map_path'], caption="Tyre Wear Level Comparison", use_column_width=True)
-
-# ---------- UPDATED WEAR ANALYSIS FUNCTION (REPLACES ORIGINAL) ----------
-def analyze_wear_image(image_path):
-    """
-    UPDATED: Store original image path for report generation
-    """
-    try:
-        # First validate if it's a tyre image
-        if not is_tyre_image(image_path):
-            st.error("🚫 **Image Not Supported**: This doesn't appear to be a tyre image. Please upload a clear photograph of a tyre showing the tread pattern and rubber surface.")
-            st.info("💡 **Tip**: Make sure your image shows a real tyre with visible tread patterns, not diagrams, flowcharts, or other objects.")
-            return 0
-        
-        result = analyze_comprehensive_wear(image_path)
-        
-        if "error" in result:
-            st.error(f"Wear analysis error: {result['error']}")
-            return 0
-        
-        # Store original image path in results
-        result['original_image_path'] = image_path
-        
-        # Store detailed results in session state for report generation
-        if 'wear_analysis_results' not in st.session_state:
-            st.session_state['wear_analysis_results'] = {}
-        
-        st.session_state['wear_analysis_results'] = result
-        
-        # Display results in Streamlit
-        display_wear_analysis_results(result)
-        
-        return result['wear_percentage']
-        
-    except Exception as e:
-        st.error(f"Wear analysis failed: {e}")
-        return 0
-    
-# ---------- SESSION STATE INITIALIZATION (NEW) ----------
+# ---------- SESSION STATE INITIALIZATION ----------
 
 def initialize_session_state():
     if 'cad_screenshots_captured' not in st.session_state:
         st.session_state['cad_screenshots_captured'] = False
     if 'cad_screenshot_paths' not in st.session_state:
         st.session_state['cad_screenshot_paths'] = []
-    if 'multiple_wear_results' not in st.session_state:
-        st.session_state['multiple_wear_results'] = []
-    if 'wear_image_paths' not in st.session_state:
-        st.session_state['wear_image_paths'] = []
-
-# def initialize_session_state():
-#     """
-#     Initialize all session state variables
-#     """
-#     session_vars = {
-#         'cad_screenshot_captured': False,
-#         'cad_screenshot_path': None,
-#         'cad_file_uploaded': False,
-#         'processing_cad': False,
-#         'nx_views': {},
-#         'wear_analysis_results': {}
-#     }
-    
-#     for var, default_value in session_vars.items():
-#         if var not in st.session_state:
-#             st.session_state[var] = default_value
+    if 'nx_screenshots_captured' not in st.session_state:
+        st.session_state['nx_screenshots_captured'] = False
+    if 'nx_screenshot_paths' not in st.session_state:
+        st.session_state['nx_screenshot_paths'] = []
+    # NEW: Add wear analysis session state variables
+    if 'wear_analysis_completed' not in st.session_state:
+        st.session_state['wear_analysis_completed'] = False
+    if 'wear_analysis_results' not in st.session_state:
+        st.session_state['wear_analysis_results'] = {}
+    if 'original_tyre_image' not in st.session_state:
+        st.session_state['original_tyre_image'] = None
 
 # ---------- PDF Extraction (UNCHANGED) ----------
 def extract_pdf_info(pdf_path):
@@ -619,7 +168,289 @@ def open_autocad_and_capture_screenshot(dwg_path):
         st.error(f"Error opening AutoCAD or capturing screenshot: {e}")
         return None
     
-# ---------- NX Functions (UNCHANGED) ----------
+    # ---------- NEW: Tyre Wear Analysis Functions ----------
+def analyze_tyre_wear(image_path, wear_percentage):
+    """
+    Enhanced tyre wear analysis with realistic wear visualization
+    Creates visual representations of different wear stages with detailed effects
+    """
+    try:
+        import cv2
+        import numpy as np
+        from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
+        
+        # Load the original image
+        img = cv2.imread(image_path)
+        if img is None:
+            return None
+            
+        # Convert to PIL for easier manipulation
+        pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        
+        # Create enhanced wear simulation
+        enhanced_img = pil_img.copy()
+        
+        # Apply wear effects based on percentage
+        if wear_percentage > 0:
+            # Convert to numpy for advanced processing
+            img_array = np.array(enhanced_img)
+            
+            # Create wear pattern overlay
+            height, width = img_array.shape[:2]
+            
+            # Generate wear texture based on percentage
+            wear_intensity = wear_percentage / 100.0
+            
+            # Create random wear pattern
+            np.random.seed(42)  # For consistent results
+            wear_pattern = np.random.random((height, width)) * wear_intensity
+            
+            # Apply different wear effects based on percentage
+            if wear_percentage >= 25:
+                # Add surface roughness
+                noise = np.random.normal(0, 20 * wear_intensity, img_array.shape)
+                img_array = np.clip(img_array + noise, 0, 255)
+                
+            if wear_percentage >= 50:
+                # Add darker patches (worn areas)
+                dark_patches = wear_pattern > 0.3
+                img_array[dark_patches] = img_array[dark_patches] * (1 - wear_intensity * 0.4)
+                
+                # Add tread wear lines
+                for i in range(0, height, max(1, int(30 * (1 - wear_intensity)))):
+                    start_y = max(0, i - 2)
+                    end_y = min(height, i + 2)
+                    img_array[start_y:end_y, :] = img_array[start_y:end_y, :] * 0.7
+                    
+            if wear_percentage >= 75:
+                # Severe wear - add more dramatic effects
+                severe_wear = wear_pattern > 0.2
+                img_array[severe_wear] = img_array[severe_wear] * 0.5
+                
+                # Add worn spots
+                for _ in range(int(wear_percentage / 10)):
+                    spot_x = np.random.randint(0, width - 50)
+                    spot_y = np.random.randint(0, height - 50)
+                    img_array[spot_y:spot_y+50, spot_x:spot_x+50] = img_array[spot_y:spot_y+50, spot_x:spot_x+50] * 0.4
+            
+            # Convert back to PIL
+            enhanced_img = Image.fromarray(np.uint8(np.clip(img_array, 0, 255)))
+            
+            # Apply additional PIL effects
+            if wear_percentage > 0:
+                # Reduce contrast for worn look
+                enhancer = ImageEnhance.Contrast(enhanced_img)
+                enhanced_img = enhancer.enhance(1 - wear_intensity * 0.3)
+                
+                # Add slight blur for worn texture
+                if wear_percentage > 50:
+                    enhanced_img = enhanced_img.filter(ImageFilter.GaussianBlur(radius=wear_intensity))
+        
+        # Add wear information overlay
+        draw = ImageDraw.Draw(enhanced_img)
+        
+        # Determine text color and background based on wear percentage
+        if wear_percentage == 0:
+            text_color = (0, 255, 0)  # Green for new
+            bg_color = (0, 0, 0, 180)  # Semi-transparent black
+            status_text = "NEW TYRE"
+        elif wear_percentage <= 25:
+            text_color = (255, 255, 0)  # Yellow for light wear
+            bg_color = (0, 0, 0, 180)
+            status_text = "LIGHT WEAR"
+        elif wear_percentage <= 50:
+            text_color = (255, 165, 0)  # Orange for moderate wear
+            bg_color = (0, 0, 0, 180)
+            status_text = "MODERATE WEAR"
+        else:
+            text_color = (255, 0, 0)  # Red for heavy wear
+            bg_color = (0, 0, 0, 180)
+            status_text = "HEAVY WEAR"
+        
+        # Load font
+        try:
+            title_font = ImageFont.truetype("arial.ttf", 36)
+            percent_font = ImageFont.truetype("arial.ttf", 48)
+            status_font = ImageFont.truetype("arial.ttf", 24)
+        except:
+            title_font = ImageFont.load_default()
+            percent_font = ImageFont.load_default()
+            status_font = ImageFont.load_default()
+        
+        # Create overlay for text background
+        overlay = Image.new('RGBA', enhanced_img.size, (0, 0, 0, 0))
+        overlay_draw = ImageDraw.Draw(overlay)
+        
+        # Main percentage text
+        percent_text = f"{wear_percentage}%"
+        percent_bbox = draw.textbbox((0, 0), percent_text, font=percent_font)
+        percent_width = percent_bbox[2] - percent_bbox[0]
+        percent_height = percent_bbox[3] - percent_bbox[1]
+        
+        # Position text at top right
+        percent_x = enhanced_img.width - percent_width - 30
+        percent_y = 20
+        
+        # Draw background rectangle for percentage
+        overlay_draw.rectangle([
+            percent_x - 15, percent_y - 10,
+            percent_x + percent_width + 15, percent_y + percent_height + 10
+        ], fill=bg_color)
+        
+        # Status text
+        status_bbox = draw.textbbox((0, 0), status_text, font=status_font)
+        status_width = status_bbox[2] - status_bbox[0]
+        status_height = status_bbox[3] - status_bbox[1]
+        
+        status_x = percent_x + (percent_width - status_width) // 2
+        status_y = percent_y + percent_height + 15
+        
+        # Draw background rectangle for status
+        overlay_draw.rectangle([
+            status_x - 10, status_y - 5,
+            status_x + status_width + 10, status_y + status_height + 5
+        ], fill=bg_color)
+        
+        # Composite the overlay
+        enhanced_img = Image.alpha_composite(enhanced_img.convert('RGBA'), overlay)
+        
+        # Draw the text
+        final_draw = ImageDraw.Draw(enhanced_img)
+        final_draw.text((percent_x, percent_y), percent_text, fill=text_color, font=percent_font)
+        final_draw.text((status_x, status_y), status_text, fill=text_color, font=status_font)
+        
+        # Add wear indicator bar at bottom
+        bar_height = 20
+        bar_y = enhanced_img.height - bar_height - 20
+        bar_x = 30
+        bar_width = enhanced_img.width - 60
+        
+        # Background bar
+        final_draw.rectangle([bar_x, bar_y, bar_x + bar_width, bar_y + bar_height], 
+                           fill=(100, 100, 100, 200))
+        
+        # Wear progress bar
+        progress_width = int(bar_width * (wear_percentage / 100))
+        if progress_width > 0:
+            final_draw.rectangle([bar_x, bar_y, bar_x + progress_width, bar_y + bar_height], 
+                               fill=text_color)
+        
+        # Add "WEAR LEVEL" text above bar
+        wear_label = "WEAR LEVEL"
+        label_bbox = draw.textbbox((0, 0), wear_label, font=status_font)
+        label_width = label_bbox[2] - label_bbox[0]
+        label_x = bar_x + (bar_width - label_width) // 2
+        label_y = bar_y - 30
+        
+        final_draw.rectangle([label_x - 5, label_y - 3, label_x + label_width + 5, label_y + 20], 
+                           fill=(0, 0, 0, 150))
+        final_draw.text((label_x, label_y), wear_label, fill=(255, 255, 255), font=status_font)
+        
+        # Save the result
+        output_path = image_path.replace('.png', f'_wear_{wear_percentage}%.png')
+        enhanced_img.convert('RGB').save(output_path, quality=95)
+        
+        return output_path
+        
+    except Exception as e:
+        st.error(f"Error in tyre wear analysis: {e}")
+        return None
+
+def perform_tyre_wear_analysis(original_image_path):
+    """
+    Generate all four wear analysis images (0%, 25%, 50%, 75%)
+    """
+    wear_percentages = [0, 25, 50, 75]
+    analysis_results = {}
+    
+    for percentage in wear_percentages:
+        analyzed_path = analyze_tyre_wear(original_image_path, percentage)
+        if analyzed_path:
+            analysis_results[f"{percentage}%"] = analyzed_path
+    
+    return analysis_results
+
+def open_nx_for_wear_analysis():
+    """
+    Open NX specifically for tyre wear analysis - captures single isometric view
+    """
+    try:
+        # Launch NX
+        nx_path = r"D:\abcde\NXBIN\ugraf.exe"
+        nx_process = subprocess.Popen([nx_path], shell=True)
+        st.info("Opening NX for tyre wear analysis... Please wait.")
+        time.sleep(20)
+        
+        # Find and activate NX window
+        nx_window = None
+        for w in gw.getWindowsWithTitle('NX'):
+            if 'NX' in w.title:
+                if not w.isMaximized:
+                    w.maximize()
+                w.activate()
+                nx_window = w
+                break
+        
+        if not nx_window:
+            st.error("Could not find NX window for wear analysis.")
+            return None
+        
+        # Instructions for user
+        st.warning("🔧 Please manually open your 3D tyre model in NX for wear analysis.")
+        st.info("📋 Set up an isometric view showing the tyre tread clearly.")
+        
+        # Wait for manual setup
+        time.sleep(15)
+        
+        # Countdown for capture
+        countdown_placeholder = st.empty()
+        for countdown in range(8, 0, -1):
+            countdown_placeholder.warning(f"⏰ Capturing tyre model for wear analysis in {countdown} seconds...")
+            time.sleep(1)
+        countdown_placeholder.empty()
+        
+        # Ensure NX is active and fit view
+        nx_window.activate()
+        time.sleep(1)
+        pyautogui.press('f')  # Fit view
+        time.sleep(2)
+        
+        # Capture screenshot
+        st.success("📸 Capturing tyre model for wear analysis...")
+        screenshot = pyautogui.screenshot()
+        
+        # Crop to viewport
+        screen_width, screen_height = pyautogui.size()
+        left = screen_width * 0.12
+        top = screen_height * 0.12
+        right = screen_width * 0.88
+        bottom = screen_height * 0.88
+        
+        cropped_screenshot = screenshot.crop((left, top, right, bottom))
+        
+        # Save original capture
+        output_path = os.path.join(tempfile.gettempdir(), "tyre_wear_original.png")
+        cropped_screenshot.save(output_path)
+        
+        # Close NX
+        st.info("Closing NX application...")
+        nx_window.activate()
+        pyautogui.hotkey('alt', 'f4')
+        time.sleep(2)
+        pyautogui.press('n')  # Don't save
+        
+        try:
+            nx_process.terminate()
+        except:
+            pass
+        
+        return output_path
+        
+    except Exception as e:
+        st.error(f"Error in NX wear analysis capture: {e}")
+        return None
+    
+# ---------- NX Functions - Updated for Multiple Files ----------
 def open_nx_and_capture_views_manual(prt_file_path="", manual_file_open=True):
     """
     Enhanced NX automation with precise viewport capture and clear user signals
@@ -780,34 +611,114 @@ def open_nx_and_capture_views_manual(prt_file_path="", manual_file_open=True):
         except:
             pass
         return {}
+
+# def open_nx_and_capture_screenshot(prt_path):
+#     """
+#     Open NX with a specific file and capture a screenshot
+#     """
+#     try:
+#         # Launch NX with the specific file
+#         nx_path = r"D:\abcde\NXBIN\ugraf.exe"  # Adjust this to your NX installation path
+#         nx_process = subprocess.Popen([nx_path, prt_path], shell=True)
+        
+#         st.info("Opening NX... Waiting for file to load.")
+#         time.sleep(20)  # Wait for NX to open and load the file
+        
+#         # Find and activate the NX window
+#         nx_window = None
+#         attempts = 0
+#         while attempts < 3 and not nx_window:
+#             for w in gw.getWindowsWithTitle('NX'):
+#                 if 'NX' in w.title:
+#                     if not w.isMaximized:
+#                         w.maximize()
+#                     w.activate()
+#                     nx_window = w
+#                     break
+#             if not nx_window:
+#                 time.sleep(3)
+#                 attempts += 1
+                
+#         if not nx_window:
+#             st.error("Could not find NX window. Please check if NX launched properly.")
+#             return None
+
+#         # Dismiss any startup dialogs
+#         pyautogui.press('escape')
+#         time.sleep(1)
+        
+#         # Click on empty area and ensure NX is active
+#         screen_width, screen_height = pyautogui.size()
+#         pyautogui.click(screen_width//2, screen_height//2)
+#         nx_window.activate()
+#         time.sleep(2)
+
+#         # Fit view to screen for better capture
+#         pyautogui.press('f')
+#         time.sleep(3)
+        
+#         # Take full screen screenshot first
+#         screenshot = pyautogui.screenshot()
+        
+#         # Crop to show only the 3D viewport area
+#         left = screen_width * 0.12   # Remove left toolbar area
+#         top = screen_height * 0.12   # Remove ribbon and title bar
+#         right = screen_width * 0.88  # Remove right panels
+#         bottom = screen_height * 0.88  # Remove bottom status/command area
+        
+#         cropped_screenshot = screenshot.crop((left, top, right, bottom))
+        
+#         # Save cropped screenshot
+#         output_image_path = os.path.join(tempfile.gettempdir(), "nx_screenshot.png")
+#         cropped_screenshot.save(output_image_path)
+        
+#         # Close NX after capturing
+#         if nx_window:
+#             try:
+#                 # Send ALT+F4 to close NX
+#                 nx_window.activate()
+#                 pyautogui.hotkey('alt', 'f4')
+#                 time.sleep(1)
+#                 # Handle any save dialog by pressing 'n' for No
+#                 pyautogui.press('n')
+#             except Exception as e:
+#                 st.warning(f"Could not gracefully close NX: {e}")
+#                 # Force kill the process if graceful close failed
+#                 try:
+#                     nx_process.kill()
+#                 except:
+#                     pass
+
+#         return output_image_path
+
+#     except Exception as e:
+#         st.error(f"Error opening NX or capturing screenshot: {e}")
+#         return None
     
 # ---------- UPDATED PDF Report Generator ----------
-def generate_pdf(pdf_info, excel_df, image_paths, cad_image_paths, output_path):
+def generate_pdf(pdf_info, excel_df, cad_image_paths, nx_model_groups, output_path):
     """
-    UPDATED: Enhanced PDF generation with multiple file support
+    UPDATED: Enhanced PDF generation with grid layout for NX screenshots
     """
     doc = SimpleDocTemplate(output_path, pagesize=A4, 
                           topMargin=72, bottomMargin=72, leftMargin=72, rightMargin=72)
     styles = getSampleStyleSheet()
     elements = []
 
-        # Add Apollo Tyres Logo at the top center
+    # Add Apollo Tyres Logo at the top center
     try:
         if os.path.exists("apollo_logo.png"):
-            logo = Image("apollo_logo.png", width=150, height=75)  # Adjust size as needed
+            logo = Image("apollo_logo.png", width=150, height=75)
             logo.hAlign = 'CENTER'
             elements.append(logo)
             elements.append(Spacer(1, 20))
         else:
-            # Fallback company header if logo not found
             elements.append(Paragraph("<b>APOLLO TYRES LTD</b>", styles["Title"]))
             elements.append(Spacer(1, 10))
     except Exception as e:
-        # Fallback text header
         elements.append(Paragraph("<b>APOLLO TYRES LTD</b>", styles["Title"]))
         elements.append(Spacer(1, 10))
 
-    
     # Title
     elements.append(Paragraph("<b>Enhanced Tyre Design Proposal Report</b>", styles["Title"]))
     elements.append(Spacer(1, 20))
@@ -816,60 +727,11 @@ def generate_pdf(pdf_info, excel_df, image_paths, cad_image_paths, output_path):
     elements.append(Paragraph("Extracted PDF Content:", styles["Heading2"]))
     elements.append(Spacer(1, 6))
     for i, pg in enumerate(pdf_info):
-        if not pg.startswith("Comprehensive Wear Analysis:"):
-            elements.append(Paragraph(pg.replace('\n', '<br/>'), styles["Normal"]))
-            if i < len(pdf_info) - 1:
-                elements.append(Spacer(1, 6))
+        elements.append(Paragraph(pg.replace('\n', '<br/>'), styles["Normal"]))
+        if i < len(pdf_info) - 1:
+            elements.append(Spacer(1, 6))
 
     elements.append(Spacer(1, 15))
-    
-    # Enhanced Wear Analysis Section
-    if 'wear_analysis_results' in st.session_state and st.session_state['wear_analysis_results']:
-        wear_results = st.session_state['wear_analysis_results']
-        
-        elements.append(Paragraph("Comprehensive Wear Analysis:", styles["Heading2"]))
-        elements.append(Spacer(1, 6))
-        
-        # Add multiple wear images
-        elements.append(Paragraph("Tyre Images:", styles["Heading3"]))
-        elements.append(Spacer(1, 3))
-        
-        for i, image_path in enumerate(image_paths):
-            if image_path and os.path.exists(image_path):
-                elements.append(Paragraph(f"Tyre Image {i+1}:", styles["Normal"]))
-                elements.append(Spacer(1, 3))
-                elements.append(Image(image_path, width=250, height=180))
-                elements.append(Spacer(1, 10))
-        
-        # Wear analysis results table
-        elements.append(Paragraph("Analysis Results:", styles["Heading3"]))
-        elements.append(Spacer(1, 3))
-        
-        wear_data = [
-            ["Metric", "Value", "Status"],
-            ["Wear Percentage", f"{wear_results['wear_percentage']}%", wear_results['condition']],
-            ["Safety Status", wear_results['safety_status'], ""],
-            ["Remaining Life", f"{wear_results['remaining_life_months']} months", ""],
-            ["Tread Depth Score", f"{wear_results['tread_depth_score']:.1f}", ""],
-            ["Pattern Integrity", f"{wear_results['pattern_integrity']:.1f}%", ""]
-        ]
-        
-        wear_table = Table(wear_data)
-        wear_table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("BOTTOMPADDING", (0, 0), (-1, 0), 12),
-            ("GRID", (0, 0), (-1, -1), 1, colors.black),
-        ]))
-        elements.append(wear_table)
-        elements.append(Spacer(1, 10))
-        
-        elements.append(Paragraph("Recommendations:", styles["Heading3"]))
-        elements.append(Spacer(1, 3))
-        elements.append(Paragraph(wear_results['recommendations'], styles["Normal"]))
-        elements.append(Spacer(1, 15))
 
     # Multiple CAD Screenshots Section
     if cad_image_paths:
@@ -882,6 +744,149 @@ def generate_pdf(pdf_info, excel_df, image_paths, cad_image_paths, output_path):
                 elements.append(Spacer(1, 3))
                 elements.append(Image(cad_path, width=300, height=200))
                 elements.append(Spacer(1, 10))
+
+    # Multiple NX Screenshots Section with Grid Layout
+    if nx_model_groups:
+        elements.append(Paragraph("3D NX File Screenshots:", styles["Heading2"]))
+        elements.append(Spacer(1, 6))
+        
+        for group_idx, model_group in enumerate(nx_model_groups):
+            elements.append(Paragraph(f"NX 3D Model {group_idx + 1}:", styles["Normal"]))
+            elements.append(Spacer(1, 6))
+            
+            # Create 2x2 grid for each model group (4 views)
+            if len(model_group) >= 4:
+                # Create table data for 2x2 grid
+                grid_data = []
+                
+                # Row 1: First two images
+                row1 = []
+                for i in range(2):
+                    if i < len(model_group) and os.path.exists(model_group[i]):
+                        img = Image(model_group[i], width=140, height=100)
+                        row1.append(img)
+                    else:
+                        row1.append("")
+                grid_data.append(row1)
+                
+                # Row 2: Next two images
+                row2 = []
+                for i in range(2, 4):
+                    if i < len(model_group) and os.path.exists(model_group[i]):
+                        img = Image(model_group[i], width=140, height=100)
+                        row2.append(img)
+                    else:
+                        row2.append("")
+                grid_data.append(row2)
+                
+                # Create table with 2x2 grid
+                grid_table = Table(grid_data, colWidths=[150, 150])
+                grid_table.setStyle(TableStyle([
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.lightgrey),
+                    ('LEFTPADDING', (0, 0), (-1, -1), 5),
+                    ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+                    ('TOPPADDING', (0, 0), (-1, -1), 5),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+                ]))
+                
+                elements.append(grid_table)
+            else:
+                # Fallback for less than 4 images - display them normally
+                for img_path in model_group:
+                    if os.path.exists(img_path):
+                        elements.append(Image(img_path, width=200, height=150))
+                        elements.append(Spacer(1, 5))
+            
+            elements.append(Spacer(1, 15))
+
+            # NEW: Tyre Wear Analysis Section
+    if hasattr(st.session_state, 'wear_analysis_results') and st.session_state.get('wear_analysis_completed'):
+        elements.append(Paragraph("Tyre Wear Analysis:", styles["Heading2"]))
+        elements.append(Spacer(1, 6))
+        
+        # Add original tyre image
+        if hasattr(st.session_state, 'original_tyre_image') and st.session_state['original_tyre_image']:
+            if os.path.exists(st.session_state['original_tyre_image']):
+                elements.append(Paragraph("Original Tyre Analysis:", styles["Normal"]))
+                elements.append(Spacer(1, 3))
+                elements.append(Image(st.session_state['original_tyre_image'], width=200, height=150))
+                elements.append(Spacer(1, 10))
+        
+        # Add wear progression images in 2x2 grid
+        wear_results = st.session_state.get('wear_analysis_results', {})
+        if wear_results:
+            elements.append(Paragraph("Wear Progression Analysis:", styles["Normal"]))
+            elements.append(Spacer(1, 6))
+            
+            # Create 2x2 grid for wear analysis
+            wear_stages = ['0%', '25%', '50%', '75%']
+            grid_data = []
+            
+            # Row 1: 0% and 25%
+            row1 = []
+            for stage in ['0%', '25%']:
+                if stage in wear_results and os.path.exists(wear_results[stage]):
+                    img = Image(wear_results[stage], width=140, height=100)
+                    row1.append(img)
+                else:
+                    row1.append("")
+            grid_data.append(row1)
+            
+            # Row 2: 50% and 75%
+            row2 = []
+            for stage in ['50%', '75%']:
+                if stage in wear_results and os.path.exists(wear_results[stage]):
+                    img = Image(wear_results[stage], width=140, height=100)
+                    row2.append(img)
+                else:
+                    row2.append("")
+            grid_data.append(row2)
+            
+            # Create wear analysis table
+            wear_table = Table(grid_data, colWidths=[150, 150])
+            wear_table.setStyle(TableStyle([
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                ('GRID', (0, 0), (-1, -1), 1, colors.lightgrey),
+                ('LEFTPADDING', (0, 0), (-1, -1), 5),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+                ('TOPPADDING', (0, 0), (-1, -1), 5),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+            ]))
+            
+            elements.append(wear_table)
+            elements.append(Spacer(1, 10))
+            
+            # Add wear analysis summary table
+            wear_summary_data = [
+                ['Wear Stage', 'Condition', 'Recommendation'],
+                ['0% (New)', 'Excellent', 'Continue normal use'],
+                ['25% (Light)', 'Good', 'Monitor regularly'],
+                ['50% (Moderate)', 'Fair', 'Plan replacement'],
+                ['75% (Heavy)', 'Poor', 'Replace immediately']
+            ]
+            
+            summary_table = Table(wear_summary_data)
+            summary_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 12),
+                ("GRID", (0, 0), (-1, -1), 1, colors.black),
+                # Color code the rows
+                ("BACKGROUND", (0, 1), (-1, 1), colors.lightgreen),
+                ("BACKGROUND", (0, 2), (-1, 2), colors.lightyellow),
+                ("BACKGROUND", (0, 3), (-1, 3), colors.orange),
+                ("BACKGROUND", (0, 4), (-1, 4), colors.lightcoral),
+            ]))
+            
+            elements.append(Paragraph("Wear Analysis Summary:", styles["Normal"]))
+            elements.append(Spacer(1, 3))
+            elements.append(summary_table)
+            elements.append(Spacer(1, 15))
 
     # Excel data Section
     if not excel_df.empty:
@@ -899,39 +904,27 @@ def generate_pdf(pdf_info, excel_df, image_paths, cad_image_paths, output_path):
         ]))
         elements.append(table)
         elements.append(Spacer(1, 15))
-    
-    # NX Views Section
-    if 'nx_views' in st.session_state and st.session_state['nx_views']:
-        elements.append(Paragraph("3D Model Views (NX):", styles["Heading2"]))
-        elements.append(Spacer(1, 6))
-        for view, path in st.session_state['nx_views'].items():
-            if os.path.exists(path):
-                elements.append(Paragraph(f"{view.capitalize()} View:", styles["Heading3"]))
-                elements.append(Spacer(1, 3))
-                elements.append(Image(path, width=300, height=200))
-                elements.append(Spacer(1, 10))
 
     doc.build(elements)
+
 
 # ---------- ENHANCED STREAMLIT GUI ----------
 def main():
     """
-    Main Streamlit application with enhanced wear analysis and multiple file support
+    Main Streamlit application with multiple file support
     """
     # Add logo at the top center
     add_logo_to_streamlit()
 
     st.title("Enhanced Tyre Report Generator")
 
-
     # Initialize session state
     initialize_session_state()
 
-    # Create tabs with enhanced wear analysis
-    tab1, tab2, tab3, tab4 = st.tabs([
+    # Create tabs
+    tab1, tab2, tab3 = st.tabs([
         "📸 Capture CAD Drawing", 
-        "🔍 Advanced Wear Analysis", 
-        "📐 Capture NX 3D Views", 
+        "📐 Capture NX 3D Models", 
         "📄 Generate Reports"
     ])
 
@@ -943,9 +936,6 @@ def main():
 
     with tab3:
         updated_tab3_section()  # Call the updated function
-
-    with tab4:
-        updated_tab4_section()  # Call the updated function
 
 # ---------- UPDATED TAB SECTIONS ----------
 def updated_tab1_section():
@@ -996,76 +986,251 @@ def updated_tab1_section():
 
 def updated_tab2_section():
     """
-    Updated wear analysis section with multiple file upload support
+    Enhanced NX section with tyre wear analysis
     """
-    st.header("🔍 Advanced Tyre Wear Analysis")
-    st.markdown("Upload multiple tyre wear images for comprehensive AI-powered analysis")
+    st.header("📐 NX 3D Model Capture & Analysis")
     
-    wear_image_files = st.file_uploader("Upload Tyre Wear Images", 
-                                      type=["jpg", "png", "jpeg"], 
-                                      accept_multiple_files=True,
-                                      key="wear_image_uploader_multiple")
+    # Create sub-tabs for different functionalities
+    subtab1, subtab2 = st.tabs(["🔧 Standard Views Capture", "🔍 Tyre Wear Analysis"])
     
-    if wear_image_files:
-        st.info(f"📁 {len(wear_image_files)} wear image(s) uploaded")
-        
-        # Display uploaded images
-        cols = st.columns(min(3, len(wear_image_files)))
-        for i, wear_file in enumerate(wear_image_files):
-            with cols[i % 3]:
-                st.image(wear_file, caption=f"Wear Image {i+1}", width=200)
-        
-        if st.button("🔍 Analyze All Wear Patterns", key="analyze_all_wear_btn"):
-            wear_results_list = []
-            temp_image_paths = []
+    with subtab1:
+        # Original functionality for standard views
+        if st.session_state.get('nx_screenshots_captured') and st.session_state.get('nx_screenshot_paths'):
+            st.success(f"✅ Currently have {len(st.session_state['nx_screenshot_paths'])} NX model(s) captured")
             
-            with st.spinner("Analyzing multiple tyre wear patterns... Please wait..."):
-                for i, wear_file in enumerate(wear_image_files):
-                    st.info(f"Analyzing image {i+1}/{len(wear_image_files)}")
+            with st.expander("View Captured NX Models"):
+                for i, path in enumerate(st.session_state['nx_screenshot_paths']):
+                    if os.path.exists(path):
+                        st.image(path, caption=f"NX 3D Model {i+1}")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("🚀 Open NX and Capture Views", key="nx_capture_manual_btn"):
+                # [Previous NX capture code remains the same]
+                if 'nx_screenshot_paths' in st.session_state:
+                    for old_path in st.session_state['nx_screenshot_paths']:
+                        try:
+                            if os.path.exists(old_path):
+                                os.remove(old_path)
+                        except:
+                            pass
+                
+                st.session_state['nx_screenshot_paths'] = []
+                st.session_state['nx_screenshots_captured'] = False
+                st.session_state['nx_model_groups'] = []
+                
+                views = open_nx_and_capture_views_manual("", manual_file_open=True)
+
+                if views:
+                    st.success("✅ All 3D views captured successfully from NX!")
                     
-                    # Save uploaded file temporarily
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
-                        tmp_file.write(wear_file.read())
-                        temp_image_path = tmp_file.name
-                        temp_image_paths.append(temp_image_path)
+                    model_group = []
+                    for view_name, view_path in views.items():
+                        if os.path.exists(view_path):
+                            model_group.append(view_path)
                     
-                    # Perform comprehensive wear analysis
-                    wear_percentage = analyze_wear_image(temp_image_path)
+                    st.session_state['nx_model_groups'] = [model_group]
+                    st.session_state['nx_screenshots_captured'] = True
                     
-                    if wear_percentage > 0:
-                        wear_results_list.append(st.session_state.get('wear_analysis_results', {}))
-                        st.success(f"✅ Analysis completed for image {i+1}")
+                    with st.expander("View All Captured Screenshots"):
+                        for name, path in views.items():
+                            if os.path.exists(path):
+                                st.image(path, caption=f"{name.capitalize()} View")
+                else:
+                    st.error("Failed to capture 3D views from NX.")
+        
+        with col2:
+            if st.button("🔄 Add Another NX Model", key="nx_add_another_btn"):
+                views = open_nx_and_capture_views_manual("", manual_file_open=True)
+
+                if views:
+                    st.success("✅ Additional 3D views captured successfully!")
+                    
+                    model_group = []
+                    for view_name, view_path in views.items():
+                        if os.path.exists(view_path):
+                            model_group.append(view_path)
+                    
+                    existing_groups = st.session_state.get('nx_model_groups', [])
+                    existing_groups.append(model_group)
+                    st.session_state['nx_model_groups'] = existing_groups
+                    st.session_state['nx_screenshots_captured'] = True
+                    
+                    with st.expander("View Newly Captured Screenshots"):
+                        for name, path in views.items():
+                            if os.path.exists(path):
+                                st.image(path, caption=f"{name.capitalize()} View - Model {len(existing_groups)}")
+                else:
+                    st.error("Failed to capture additional 3D views from NX.")
+        
+        if st.session_state.get('nx_screenshots_captured'):
+            st.markdown("---")
+            if st.button("🗑️ Clear All NX Captures", key="clear_nx_btn"):
+                for model_group in st.session_state.get('nx_model_groups', []):
+                    for path in model_group:
+                        try:
+                            if os.path.exists(path):
+                                os.remove(path)
+                        except:
+                            pass
+                
+                st.session_state['nx_model_groups'] = []
+                st.session_state['nx_screenshots_captured'] = False
+                st.success("✅ All NX captures cleared!")
+                st.rerun()
+    
+    with subtab2:
+        # NEW: Tyre Wear Analysis Section
+        st.subheader("🔍 Tyre Wear Analysis")
+        st.info("📋 This section analyzes tyre wear patterns and generates wear percentage visualizations (0%, 25%, 50%, 75%)")
+        
+        # Check if wear analysis has been performed
+        if st.session_state.get('wear_analysis_completed'):
+            st.success("✅ Tyre wear analysis completed!")
+            
+            # Display wear analysis results
+            # Check if wear analysis has been performed
+        if st.session_state.get('wear_analysis_completed'):
+            st.success("✅ Tyre wear analysis completed!")
+            
+            # Display wear analysis results in enhanced layout
+            if 'wear_analysis_results' in st.session_state and 'original_tyre_image' in st.session_state:
+                st.subheader("📊 Complete Tyre Wear Analysis")
+                
+                # First show the original tyre with current wear percentage indicator
+                st.markdown("### 🔍 Original Tyre Analysis")
+                original_img = st.session_state['original_tyre_image']
+                if os.path.exists(original_img):
+                    col_orig1, col_orig2, col_orig3 = st.columns([1, 2, 1])
+                    with col_orig2:
+                        st.image(original_img, caption="📊 Current Tyre Condition Assessment", use_column_width=True)
+                        st.info("👆 This shows the current tyre with wear analysis capabilities")
+                
+                st.markdown("---")
+                
+                # Then show the 4 wear progression stages
+                st.markdown("### 📈 Tyre Wear Progression Analysis")
+                st.info("👇 This shows how the tyre will look at different wear stages")
+                
+                wear_results = st.session_state['wear_analysis_results']
+                
+                # Create 2x2 grid for the 4 wear stages
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # 0% Wear - New Tyre
+                    if "0%" in wear_results and os.path.exists(wear_results["0%"]):
+                        st.image(wear_results["0%"], caption="🟢 0% Wear - Brand New Tyre", use_column_width=True)
+                        st.success("Perfect condition - Maximum grip and safety")
+                    
+                    # 50% Wear - Moderate
+                    if "50%" in wear_results and os.path.exists(wear_results["50%"]):
+                        st.image(wear_results["50%"], caption="🟠 50% Wear - Moderate Usage", use_column_width=True)
+                        st.warning("Moderate wear - Consider replacement planning")
+                
+                with col2:
+                    # 25% Wear - Light
+                    if "25%" in wear_results and os.path.exists(wear_results["25%"]):
+                        st.image(wear_results["25%"], caption="🟡 25% Wear - Light Usage", use_column_width=True)
+                        st.info("Light wear - Good condition, regular monitoring needed")
+                    
+                    # 75% Wear - Heavy
+                    if "75%" in wear_results and os.path.exists(wear_results["75%"]):
+                        st.image(wear_results["75%"], caption="🔴 75% Wear - Heavy Usage", use_column_width=True)
+                        st.error("Heavy wear - Immediate replacement recommended!")
+                
+                # Add wear analysis summary
+                st.markdown("---")
+                st.markdown("### 📋 Wear Analysis Summary")
+                
+                summary_col1, summary_col2 = st.columns(2)
+                with summary_col1:
+                    st.markdown("""
+                    **🟢 0% Wear (New)**
+                    - Full tread depth
+                    - Maximum safety
+                    - Optimal performance
+                    
+                    **🟡 25% Wear (Light)**
+                    - Good tread remaining
+                    - Safe for continued use
+                    - Monitor regularly
+                    """)
+                
+                with summary_col2:
+                    st.markdown("""
+                    **🟠 50% Wear (Moderate)**
+                    - Half tread depth remaining
+                    - Plan for replacement
+                    - Reduced wet grip
+                    
+                    **🔴 75% Wear (Heavy)**
+                    - Critical tread depth
+                    - Replace immediately
+                    - Safety risk
+                    """)
+        
+        # Action buttons
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("🔬 Start Tyre Wear Analysis", key="start_wear_analysis"):
+                with st.spinner("Starting tyre wear analysis..."):
+                    # Capture tyre model from NX
+                    original_image = open_nx_for_wear_analysis()
+                    
+                    if original_image:
+                        st.success("✅ Tyre model captured successfully!")
+                        st.image(original_image, caption="Original Tyre Model", width=300)
+                        
+                        # Perform wear analysis
+                        with st.spinner("Analyzing tyre wear patterns..."):
+                            wear_results = perform_tyre_wear_analysis(original_image)
+                            
+                            if wear_results:
+                                # Store results in session state
+                                st.session_state['wear_analysis_results'] = wear_results
+                                st.session_state['wear_analysis_completed'] = True
+                                st.session_state['original_tyre_image'] = original_image
+                                
+                                st.success("🎉 Tyre wear analysis completed successfully!")
+                                st.balloons()
+                                st.rerun()
+                            else:
+                                st.error("❌ Failed to complete wear analysis")
                     else:
-                        st.error(f"❌ Analysis failed for image {i+1}")
-            
-            if wear_results_list:
-                st.session_state['multiple_wear_results'] = wear_results_list
-                st.session_state['wear_image_paths'] = temp_image_paths
-                st.success(f"🎉 Successfully analyzed {len(wear_results_list)} tyre images!")
+                        st.error("❌ Failed to capture tyre model from NX")
+        
+        with col2:
+            if st.button("🗑️ Clear Wear Analysis", key="clear_wear_analysis"):
+                # Clean up wear analysis files
+                if 'wear_analysis_results' in st.session_state:
+                    for wear_path in st.session_state['wear_analysis_results'].values():
+                        try:
+                            if os.path.exists(wear_path):
+                                os.remove(wear_path)
+                        except:
+                            pass
+                
+                if 'original_tyre_image' in st.session_state:
+                    try:
+                        if os.path.exists(st.session_state['original_tyre_image']):
+                            os.remove(st.session_state['original_tyre_image'])
+                    except:
+                        pass
+                
+                # Clear session state
+                st.session_state['wear_analysis_results'] = {}
+                st.session_state['wear_analysis_completed'] = False
+                st.session_state['original_tyre_image'] = None
+                
+                st.success("✅ Wear analysis data cleared!")
+                st.rerun()
 
 def updated_tab3_section():
     """
-    Updated NX section with enhanced manual control
-    """
-    st.header("📐 NX 3D View Capture")
-    st.info("💡 Click the button below to open NX. You will get notifications for each view capture.")
-    
-    if st.button("🚀 Open NX and Capture Views with Manual Control", key="nx_capture_manual_btn"):
-        views = open_nx_and_capture_views_manual("", manual_file_open=True)
-
-        if views:
-            st.success("✅ All 3D views captured successfully from NX!")
-            st.session_state['nx_views'] = views
-            
-            with st.expander("View All Captured Screenshots"):
-                for name, path in views.items():
-                    st.image(path, caption=f"{name.capitalize()} View")
-        else:
-            st.error("Failed to capture 3D views from NX.")
-
-def updated_tab4_section():
-    """
-    Updated report generation section with multiple file support
+    Updated report generation section with model groups support
     """
     st.header("📄 Generate Enhanced Reports")
     
@@ -1078,20 +1243,19 @@ def updated_tab4_section():
                                  accept_multiple_files=True,
                                  key="excel_uploader_multiple")
     
-    # Status indicators
-    col1, col2, col3 = st.columns(3)
+    # Status indicators with count
+    col1, col2 = st.columns(2)
     with col1:
-        cad_status = "✅ Ready" if st.session_state.get('cad_screenshots_captured') else "❌ Not captured"
+        cad_count = len(st.session_state.get('cad_screenshot_paths', []))
+        cad_status = f"✅ {cad_count} drawings ready" if st.session_state.get('cad_screenshots_captured') else "❌ Not captured"
         st.info(f"CAD Drawings: {cad_status}")
     
     with col2:
-        wear_status = "✅ Analyzed" if st.session_state.get('multiple_wear_results') else "❌ Not analyzed"
-        st.info(f"Wear Analysis: {wear_status}")
-    
-    with col3:
-        nx_status = "✅ Captured" if st.session_state.get('nx_views') else "❌ Not captured"
-        st.info(f"NX Views: {nx_status}")
-    
+        nx_groups = st.session_state.get('nx_model_groups', [])
+        nx_count = len(nx_groups)
+        nx_status = f"✅ {nx_count} models ready" if st.session_state.get('nx_screenshots_captured') else "❌ Not captured"
+        st.info(f"NX Models: {nx_status}")
+        
     # Generate Report Button
     if st.button("🚀 Generate Enhanced Report"):
         missing_items = []
@@ -1101,8 +1265,8 @@ def updated_tab4_section():
             missing_items.append("Excel files")
         if not st.session_state.get('cad_screenshots_captured'):
             missing_items.append("CAD drawing captures")
-        if not st.session_state.get('multiple_wear_results'):
-            missing_items.append("Wear analysis")
+        if not st.session_state.get('nx_screenshots_captured'):
+            missing_items.append("NX model captures")
         
         if missing_items:
             st.error(f"Missing required items: {', '.join(missing_items)}")
@@ -1129,15 +1293,15 @@ def updated_tab4_section():
                         excel_df = read_excel_data(excel_path)
                         combined_excel_df = pd.concat([combined_excel_df, excel_df], ignore_index=True)
                     
-                    # Get image paths
-                    wear_image_paths = st.session_state.get('wear_image_paths', [])
+                    # Get image paths and model groups
                     cad_screenshot_paths = st.session_state.get('cad_screenshot_paths', [])
+                    nx_model_groups = st.session_state.get('nx_model_groups', [])
                     
                     # Output path for PDF only
                     pdf_out_path = os.path.join(tmpdir, "Enhanced_Tyre_Report.pdf")
                     
-                    # Generate PDF report only
-                    generate_pdf(all_pdf_info, combined_excel_df, wear_image_paths, cad_screenshot_paths, pdf_out_path)
+                    # Generate PDF report with model groups
+                    generate_pdf(all_pdf_info, combined_excel_df, cad_screenshot_paths, nx_model_groups, pdf_out_path)
                     
                     # Download button for PDF only
                     with open(pdf_out_path, "rb") as f:
@@ -1149,7 +1313,6 @@ def updated_tab4_section():
                         )
             
             st.success("Enhanced PDF report generated successfully!")
-
-# ---------- RUN THE APPLICATION ----------
+            # ---------- RUN THE APPLICATION ----------
 if __name__ == "__main__":
     main()
