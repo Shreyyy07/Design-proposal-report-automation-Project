@@ -1,12 +1,9 @@
 import streamlit as st
 import pandas as pd
-import pdfplumber
-import cv2
+import fitz  # PyMuPDF for enhanced PDF processing
+import io
+from PIL import Image as PILImage
 import tempfile
-from reportlab.lib.pagesizes import A4
-from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer, Image
-from reportlab.lib.styles import getSampleStyleSheet
 import os
 import subprocess
 import pyautogui
@@ -16,27 +13,38 @@ import shutil
 import base64
 from pptx import Presentation
 from pptx.util import Inches, Pt
-from pptx.enum.text import PP_ALIGN
+from pptx.enum.text import PP_ALIGN, MSO_AUTO_SIZE
 from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE
 import textwrap
+import glob
+import winreg
 
+# ---------- ASSET PATHS ----------
+# Define paths for assets to make them easy to change and manage.
+ASSETS_DIR = "assets"
+LOGO_PATH = os.path.join(ASSETS_DIR, "apollo_logo.png")
+SLIDE1_PATH = os.path.join(ASSETS_DIR, "slide1.png")
+PD_PATH = os.path.join(ASSETS_DIR, "pd.png")
+PD2_PATH = os.path.join(ASSETS_DIR, "pd2.png")
+MOM_PATH = os.path.join(ASSETS_DIR, "mom.png")
+LASTSLIDE_PATH = os.path.join(ASSETS_DIR, "lastslide.png")
+HEADER_BANNER_PATH = os.path.join(ASSETS_DIR, "header_banner.png")
 
 def get_apollo_logo_base64():
     """
-    Convert the Apollo Tyres logo to base64 for embedding
-    You'll need to save your logo image as 'apollo_logo.png' in the same directory
+    Reads the Apollo Tyres logo image and converts it to a base64 string.
     """
     try:
-        with open("apollo_logo.png", "rb") as img_file:
+        with open(LOGO_PATH, "rb") as img_file:
             return base64.b64encode(img_file.read()).decode()
     except FileNotFoundError:
-        # Fallback if logo file not found
+        st.warning(f"Logo not found at {LOGO_PATH}. Please ensure it exists in the 'assets' folder.")
         return None
 
 def add_logo_to_streamlit():
     """
-    Add Apollo Tyres logo to Streamlit UI at the top center
+    Displays the Apollo Tyres logo at the top-center of the Streamlit application.
     """
     logo_base64 = get_apollo_logo_base64()
     if logo_base64:
@@ -49,7 +57,6 @@ def add_logo_to_streamlit():
             unsafe_allow_html=True
         )
     else:
-        # Fallback text logo if image not found
         st.markdown(
             """
             <div style="text-align: center; margin-bottom: 20px;">
@@ -59,717 +66,900 @@ def add_logo_to_streamlit():
             unsafe_allow_html=True
         )
 
+# ---------- SOFTWARE DETECTION FUNCTIONS ----------
+
+def find_autocad_executable():
+    """
+    Automatically finds the AutoCAD executable ('acad.exe') on the system.
+    """
+    if 'custom_autocad_path' in st.session_state and st.session_state['custom_autocad_path']:
+        custom_path = st.session_state['custom_autocad_path']
+        if os.path.exists(custom_path):
+            return custom_path
+    
+    possible_paths = [
+        "C:/Program Files/Autodesk/AutoCAD 2025/acad.exe",
+        "C:/Program Files/Autodesk/AutoCAD 2024/acad.exe",
+        "C:/Program Files/Autodesk/AutoCAD 2023/acad.exe",
+    ]
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    
+    autocad_patterns = ["C:/Program Files/Autodesk/AutoCAD*/acad.exe"]
+    for pattern in autocad_patterns:
+        matches = glob.glob(pattern)
+        if matches:
+            matches.sort(reverse=True)
+            return matches[0]
+    
+    return None
+
+def find_nx_executable():
+    """
+    Automatically finds the Siemens NX executable ('ugraf.exe') on the system.
+    """
+    if 'custom_nx_path' in st.session_state and st.session_state['custom_nx_path']:
+        custom_path = st.session_state['custom_nx_path']
+        if os.path.exists(custom_path):
+            return custom_path
+    
+    nx_patterns = [
+        "C:/Program Files/Siemens/NX*/NXBIN/ugraf.exe",
+        "D:/abcde/NXBIN/ugraf.exe",
+    ]
+    
+    for pattern in nx_patterns:
+        matches = glob.glob(pattern)
+        if matches:
+            matches.sort(reverse=True)
+            return matches[0]
+            
+    return None
+
 # ---------- SESSION STATE INITIALIZATION ----------
 
 def initialize_session_state():
+    """
+    Initializes the Streamlit session state variables.
+    """
     if 'cad_screenshots_captured' not in st.session_state:
         st.session_state['cad_screenshots_captured'] = False
     if 'cad_screenshot_paths' not in st.session_state:
         st.session_state['cad_screenshot_paths'] = []
     if 'nx_screenshots_captured' not in st.session_state:
         st.session_state['nx_screenshots_captured'] = False
-    if 'nx_screenshot_paths' not in st.session_state:
-        st.session_state['nx_screenshot_paths'] = []
+    if 'nx_model_groups' not in st.session_state:
+        st.session_state['nx_model_groups'] = []
+    if 'custom_autocad_path' not in st.session_state:
+        st.session_state['custom_autocad_path'] = ""
+    if 'custom_nx_path' not in st.session_state:
+        st.session_state['custom_nx_path'] = ""
 
-# ---------- PDF Extraction ----------
-def extract_pdf_info(pdf_path):
-    content = []
-    try:
-        with pdfplumber.open(pdf_path) as pdf:
-            for page in pdf.pages:
-                text = page.extract_text()
-                if text:
-                    content.append(text)
-        return content[:3]
-    except Exception as e:
-        return [f"PDF error: {e}"]
+# ---------- PDF EXTRACTION ----------
+def extract_pdf_elements(pdf_path):
+    """
+    Extracts both text and images from a PDF, page by page, with their bounding boxes.
+    """
+    doc = fitz.open(pdf_path)
+    pages_elements = []
+    
+    for page_num, page in enumerate(doc):
+        page_elements = []
+        blocks = page.get_text("dict", flags=11)["blocks"]
+        for b in blocks:
+            for l in b["lines"]:
+                for s in l["spans"]:
+                    page_elements.append({
+                        "type": "text",
+                        "bbox": s["bbox"],
+                        "text": s["text"],
+                        "size": s["size"] # Also extract font size
+                    })
 
-# ---------- Excel Reading ----------
+        image_list = page.get_images(full=True)
+        for img_index, img in enumerate(image_list):
+            xref = img[0]
+            base_image = doc.extract_image(xref)
+            image_bytes = base_image["image"]
+            
+            img_rects = page.get_image_rects(img)
+            if img_rects:
+                bbox = img_rects[0]
+                page_elements.append({
+                    "type": "image",
+                    "bbox": bbox,
+                    "bytes": image_bytes
+                })
+
+        page_elements.sort(key=lambda el: (el["bbox"][1], el["bbox"][0]))
+        pages_elements.append((page.rect, page_elements))
+        
+    return pages_elements
+
+# ---------- EXCEL READING ----------
 def read_excel_data(excel_path):
+    """
+    Reads data from an Excel file into a pandas DataFrame.
+    """
     try:
         return pd.read_excel(excel_path)
     except Exception as e:
         st.error(f"Excel error: {e}")
         return pd.DataFrame()
 
-# ---------- AutoCAD Functions ----------
+# ---------- AUTOCAD FUNCTIONS (SMART CONTENT DETECTION) ----------
 def open_autocad_and_capture_screenshot(dwg_path):
+    """
+    Automates opening AutoCAD and takes a precise screenshot with smart content detection
+    to crop only the drawing area, removing all white space from sides.
+    """
+    autocad_process = None
     try:
-        # Start AutoCAD process
-        autocad_process = subprocess.Popen(["C:/Program Files/Autodesk/AutoCAD 2023/acad.exe", dwg_path])
-
-        st.info("Opening AutoCAD... Waiting for file to load.")
-        time.sleep(15)  # Wait for AutoCAD to open and load the DWG
-
-        # Maximize AutoCAD window
-        autocad_window = None
-        for w in gw.getWindowsWithTitle('AutoCAD'):
-            if not w.isMaximized:
-                w.maximize()
-            w.activate()
-            autocad_window = w
-            break
-
-        time.sleep(2)
-
-        # Send "Zoom Extents" command
-        pyautogui.press('esc')
-        time.sleep(1)
-        pyautogui.typewrite('zoom\n')
-        time.sleep(1)
-        pyautogui.typewrite('e\n')
-        time.sleep(5)  # Wait more after zoom
-
-        # Take full screen screenshot first
-        screenshot = pyautogui.screenshot()
-
-        screen_width, screen_height = pyautogui.size()
+        autocad_path = find_autocad_executable()
+        if not autocad_path:
+            st.error("❌ AutoCAD not found. Please configure the path in settings.")
+            return None
         
-        # More precise cropping to capture only the main drawing area
-        # These values focus on the central drawing viewport, excluding toolbars, ribbons, and panels
-        left = screen_width * 0.15   # Remove left panel/toolbars more aggressively
-        top = screen_height * 0.20   # Remove ribbon, title bar, and top toolbars
-        right = screen_width * 0.85  # Remove right panels and properties
-        bottom = screen_height * 0.75  # Remove command line, status bar, and bottom elements
+        st.info(f"📍 Found AutoCAD at: {autocad_path}")
+        autocad_process = subprocess.Popen([autocad_path, dwg_path])
 
-        cropped_screenshot = screenshot.crop((left, top, right, bottom))
+        st.info("Opening AutoCAD... Please wait.")
+        time.sleep(18)
+        
+        autocad_window = None
+        for _ in range(10): 
+            windows = gw.getWindowsWithTitle('AutoCAD')
+            if windows:
+                autocad_window = windows[0]
+                break
+            time.sleep(1)
+        
+        if not autocad_window:
+            st.error("Could not find AutoCAD window. Automation failed.")
+            if autocad_process: autocad_process.kill()
+            return None
 
-        # Save cropped screenshot
+        autocad_window.activate()
+        if not autocad_window.isMaximized:
+            autocad_window.maximize()
+        time.sleep(3)
+
+        pyautogui.press('esc', presses=2, interval=0.3)
+        pyautogui.typewrite('zoom\n')
+        time.sleep(0.5)
+        pyautogui.typewrite('e\n')
+        time.sleep(5)  # Wait for zoom to complete
+
+        # Additional wait time before taking screenshot
+        st.info("Waiting for drawing to render properly...")
+        time.sleep(3)
+
+        win_left, win_top, win_width, win_height = autocad_window.left, autocad_window.top, autocad_window.width, autocad_window.height
+        
+        # Initial aggressive cropping to remove UI elements
+        top_offset = 220
+        bottom_offset = 140
+        left_offset = 350
+        right_offset = 120
+        
+        # Take initial screenshot of the viewport area
+        initial_region = (
+            win_left + left_offset,
+            win_top + top_offset,
+            win_width - left_offset - right_offset,
+            win_height - top_offset - bottom_offset
+        )
+        
+        initial_screenshot = pyautogui.screenshot(region=initial_region)
+        
+        # Convert to PIL Image for content detection
+        img = initial_screenshot
+        img_array = img.load()
+        img_width, img_height = img.size
+        
+        # Find content boundaries by detecting non-white pixels
+        # Threshold for "white" pixels (allowing slight variations)
+        white_threshold = 240
+        
+        # Find leftmost non-white column
+        left_content = 0
+        for x in range(img_width):
+            has_content = False
+            for y in range(img_height):
+                r, g, b = img_array[x, y][:3]
+                if r < white_threshold or g < white_threshold or b < white_threshold:
+                    has_content = True
+                    break
+            if has_content:
+                left_content = max(0, x - 20)  # Add small margin
+                break
+        
+        # Find rightmost non-white column
+        right_content = img_width
+        for x in range(img_width - 1, -1, -1):
+            has_content = False
+            for y in range(img_height):
+                r, g, b = img_array[x, y][:3]
+                if r < white_threshold or g < white_threshold or b < white_threshold:
+                    has_content = True
+                    break
+            if has_content:
+                right_content = min(img_width, x + 20)  # Add small margin
+                break
+        
+        # Find topmost non-white row
+        top_content = 0
+        for y in range(img_height):
+            has_content = False
+            for x in range(img_width):
+                r, g, b = img_array[x, y][:3]
+                if r < white_threshold or g < white_threshold or b < white_threshold:
+                    has_content = True
+                    break
+            if has_content:
+                top_content = max(0, y - 10)  # Add small margin
+                break
+        
+        # Find bottommost non-white row
+        bottom_content = img_height
+        for y in range(img_height - 1, -1, -1):
+            has_content = False
+            for x in range(img_width):
+                r, g, b = img_array[x, y][:3]
+                if r < white_threshold or g < white_threshold or b < white_threshold:
+                    has_content = True
+                    break
+            if has_content:
+                bottom_content = min(img_height, y + 10)  # Add small margin
+                break
+        
+        # Crop to content boundaries
+        if right_content > left_content and bottom_content > top_content:
+            cropped_screenshot = img.crop((left_content, top_content, right_content, bottom_content))
+        else:
+            # Fallback: use original image if content detection fails
+            cropped_screenshot = img
+        
         output_image_path = os.path.join(tempfile.gettempdir(), "cad_screenshot.png")
         cropped_screenshot.save(output_image_path)
-
-        # Close AutoCAD after capturing
-        if autocad_window:
-            try:
-                # Send ALT+F4 to close AutoCAD
-                autocad_window.activate()
-                pyautogui.hotkey('alt', 'f4')
-                time.sleep(1)
-                # Handle any save dialog by pressing 'n' for No
-                pyautogui.press('n')
-            except Exception as e:
-                st.warning(f"Could not gracefully close AutoCAD: {e}")
-                # Force kill the process if graceful close failed
-                try:
-                    autocad_process.kill()
-                except:
-                    pass
 
         return output_image_path
 
     except Exception as e:
-        st.error(f"Error opening AutoCAD or capturing screenshot: {e}")
+        st.error(f"Error with AutoCAD: {e}")
         return None
+    finally:
+        if autocad_process:
+            try:
+                st.info("Terminating AutoCAD process...")
+                autocad_process.terminate()
+                autocad_process.wait(timeout=5)
+            except Exception:
+                autocad_process.kill()
     
-# ---------- NX Functions ----------
-def open_nx_and_capture_views_manual(prt_file_path="", manual_file_open=True):
+# ---------- NX FUNCTIONS (INCREASED OPENING TIME) ----------
+def open_nx_and_capture_views_manual():
     """
-    Enhanced NX automation with precise viewport capture and clear user signals
+    Guides the user through capturing the three required 3D views from Siemens NX.
+    Updated with more time for NX to open and load properly.
     """
     try:
-        # Launch NX with optimized startup
-        nx_path = r"D:\abcde\NXBIN\ugraf.exe"  # Adjust this to your NX installation path
-        nx_process = subprocess.Popen([nx_path], shell=True)
-        st.info("Opening NX... Please wait for the application to load.")
-        time.sleep(20)  # Wait for NX to initialize
-        
-        # Find and activate the NX window
-        nx_window = None
-        attempts = 0
-        while attempts < 3 and not nx_window:
-            for w in gw.getWindowsWithTitle('NX'):
-                if 'NX' in w.title:
-                    if not w.isMaximized:
-                        w.maximize()
-                    w.activate()
-                    nx_window = w
-                    break
-            if not nx_window:
-                time.sleep(3)
-                attempts += 1
-                
-        if not nx_window:
-            st.error("Could not find NX window. Please check if NX launched properly.")
+        nx_path = find_nx_executable()
+        if not nx_path:
+            st.error("❌ Siemens NX not found. Please configure the path in settings.")
             return {}
-
-        # Dismiss any startup dialogs
-        pyautogui.press('escape')
-        time.sleep(1)
+        st.info(f"📍 Found NX at: {nx_path}")
+        subprocess.Popen([nx_path], shell=True)
         
-        # Click on empty area and ensure NX is active
-        screen_width, screen_height = pyautogui.size()
-        pyautogui.click(screen_width//2, screen_height//2)
+        # Increased opening time from 20 to 30 seconds
+        st.info("Opening NX... Please wait (this may take up to 30 seconds).")
+        time.sleep(30)
+
+        nx_window = gw.getWindowsWithTitle('NX')[0]
         nx_window.activate()
+        if not nx_window.isMaximized:
+            nx_window.maximize()
+        time.sleep(2)
 
-        # Display instructions for manual file opening
         st.warning("Please manually open your 3D file in NX now.")
-        st.info("After opening the file, follow the instructions below for each view.")
+        st.info("After opening, follow the instructions for each view.")
+        time.sleep(10)
         
-        # Wait for the user to manually open the file
-        time.sleep(20)  # Increased wait time for manual file opening
-        
-        # Manual view capture with enhanced user feedback
-        views_to_capture = ['Top', 'Front', 'Right', 'Isometric']
+        views_to_capture = ['Top View', 'Front View', 'Isometric View']
         screenshots = {}
-        
-        # Create placeholders for dynamic updates
         status_placeholder = st.empty()
         progress_placeholder = st.empty()
-        
+        timer_placeholder = st.empty()
+
         for i, view in enumerate(views_to_capture):
-            # Update status with clear instructions
-            status_placeholder.info(f"📍 **Step {i+1}/4**: Please manually rotate/change to **{view}** view in NX")
+            status_placeholder.info(f"📸 **Step {i+1}/{len(views_to_capture)}**: Please set the **{view}** in NX")
             progress_placeholder.progress((i) / len(views_to_capture))
             
-            # Enhanced countdown with visual feedback
-            countdown_placeholder = st.empty()
-            for countdown in range(10, 0, -1):
-                countdown_placeholder.warning(f"⏰ Capturing {view} view in {countdown} seconds... Please set your view now!")
+            # Reduced timer to 5 seconds as requested
+            for t in range(5, 0, -1):
+                timer_placeholder.info(f"Adjusting to {view}. Screenshot in {t} seconds...")
                 time.sleep(1)
             
-            countdown_placeholder.empty()
-            
-            # CAPTURE PREPARATION SIGNAL
-            prepare_placeholder = st.empty()
-            prepare_placeholder.error("🔴 **PREPARING TO CAPTURE** - Hold your view steady!")
-            time.sleep(2)
-            prepare_placeholder.empty()
-            
-            # Ensure NX window is active
+            timer_placeholder.empty()
+
             nx_window.activate()
-            time.sleep(1)
-            
-            # Fit view to screen for better capture
             pyautogui.press('f')
             time.sleep(2)
-            
-            # CAPTURE MOMENT SIGNAL
-            capture_placeholder = st.empty()
-            capture_placeholder.success("📸 **CAPTURING NOW** - Screenshot being taken!")
-            
-            # UPDATED: Capture only the 3D viewport area (not entire NX window)
+
             screenshot = pyautogui.screenshot()
-
-            left = screen_width * 0.12   # Remove left toolbar area
-            top = screen_height * 0.12   # Remove ribbon and title bar
-            right = screen_width * 0.88  # Remove right panels
-            bottom = screen_height * 0.88  # Remove bottom status/command area
+            screen_width, screen_height = pyautogui.size()
             
+            # Updated cropping - remove filename from top (more aggressive top crop)
+            left = int(screen_width * 0.28)    
+            top = int(screen_height * 0.20)    # Increased from 0.15 to remove filename
+            right = int(screen_width * 0.75)   
+            bottom = int(screen_height * 0.90)
+
             cropped_screenshot = screenshot.crop((left, top, right, bottom))
-            
-            # Save the cropped viewport screenshot
-            img_path = os.path.join(tempfile.gettempdir(), f"nxview_{view.lower()}.png")
+            img_path = os.path.join(tempfile.gettempdir(), f"nxview_{view.replace(' ', '_').lower()}.png")
             cropped_screenshot.save(img_path)
-            screenshots[view.lower()] = img_path
-            
-            capture_placeholder.empty()
-            
-            # SUCCESS CONFIRMATION SIGNAL with Enhanced Feedback
-            success_placeholder = st.empty()
-            success_placeholder.success(f"✅ **{view} VIEW CAPTURED SUCCESSFULLY!** 🎉")
-            
-            # Add a brief visual confirmation
-            time.sleep(3)  # Hold success message longer
-            success_placeholder.empty()
-            
-            # Audio-like feedback through rapid status changes (simulating beep)
-            if i < len(views_to_capture) - 1:  # Don't show for last capture
-                beep_placeholder = st.empty()
-                for beep in range(3):
-                    beep_placeholder.info("🔊 BEEP!")
-                    time.sleep(0.3)
-                    beep_placeholder.empty()
-                    time.sleep(0.2)
-                
-                # Pause message before next view
-                next_view_placeholder = st.empty()
-                next_view_placeholder.warning(f"⏳ Get ready for next view: **{views_to_capture[i+1]}** in 5 seconds...")
-                time.sleep(5)
-                next_view_placeholder.empty()
+            screenshots[view] = img_path
 
-        # Final status update with celebration
-        status_placeholder.success("🎉 **ALL VIEWS CAPTURED SUCCESSFULLY!** 🎉")
+            st.success(f"{view} captured!")
+
+        status_placeholder.success("🎉 **ALL VIEWS CAPTURED!** 🎉")
         progress_placeholder.progress(1.0)
-        
-        # Final success confirmation
-        final_placeholder = st.empty()
-        final_placeholder.balloons()  # Streamlit balloons animation
-        
-        # Close NX after capturing all views
-        st.info("Closing NX application...")
-        nx_window.activate()
-        pyautogui.hotkey('alt', 'f4')
+        st.info("Closing NX...")
+        nx_window.close()
         time.sleep(2)
-        
-        # Handle any save dialog by pressing 'n' (No)
-        pyautogui.press('n')
-        
-        # Ensure process is terminated
         try:
-            nx_process.terminate()
+            pyautogui.press('n')
         except:
             pass
-
-        st.success("✅ Completed NX session and closed application!")
+        
         return screenshots
 
     except Exception as e:
         st.error(f"Error in NX automation: {e}")
-        # Try to close NX forcefully if there was an error
-        try:
-            for w in gw.getWindowsWithTitle('NX'):
-                w.close()
-        except:
-            pass
         return {}
 
-# ---------- PowerPoint Generation Functions ----------
-def generate_ppt(pdf_info, excel_df, cad_image_paths, nx_model_groups, output_path):
+# ---------- POWERPOINT GENERATION FUNCTIONS (UPDATED) ----------
+
+def add_slide_banner(slide, title_text):
     """
-    Generate PowerPoint presentation with proper content alignment and pagination
-    Sequence: PDF Content -> Excel -> AutoCAD -> NX
+    Adds a custom purple banner with a title to the top of a slide.
     """
-    # Create presentation
+    try:
+        if os.path.exists(HEADER_BANNER_PATH):
+             slide.shapes.add_picture(HEADER_BANNER_PATH, 0, 0, width=prs.slide_width, height=Inches(0.8))
+        else:
+            banner = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, Inches(0.8))
+            banner.fill.solid()
+            banner.fill.fore_color.rgb = RGBColor(138, 43, 226)
+            banner.line.fill.background()
+    except:
+        pass
+
+    title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.15), Inches(12.33), Inches(0.5))
+    title_frame = title_box.text_frame
+    p = title_frame.paragraphs[0]
+    p.text = title_text
+    p.font.size = Pt(24)
+    p.font.bold = True
+    p.font.color.rgb = RGBColor(255, 255, 255)
+    p.alignment = PP_ALIGN.LEFT
+    title_frame.word_wrap = True
+
+def create_outline_slide(prs, topics):
+    """
+    Creates the 'Outline' slide with a DYNAMIC bulleted list of the report sections.
+    UPDATED: Now adds Apollo logo at bottom left corner.
+    """
+    blank_layout = prs.slide_layouts[6] 
+    slide = prs.slides.add_slide(blank_layout)
+
+    title_shape = slide.shapes.add_textbox(Inches(0.5), Inches(0.2), Inches(12), Inches(1.0))
+    title_tf = title_shape.text_frame
+    p_title = title_tf.paragraphs[0]
+    p_title.text = "Outline:-"
+    p_title.font.size = Pt(44)
+    p_title.font.bold = True
+
+    body_shape = slide.shapes.add_textbox(Inches(1.0), Inches(1.5), Inches(11), Inches(5.0))
+    tf = body_shape.text_frame
+    tf.clear()
+
+    for topic in topics:
+        p = tf.add_paragraph()
+        p.text = topic
+        p.font.size = Pt(24)
+        p.level = 0
+        p.space_after = Pt(12)
+
+    # Add Apollo logo at bottom left corner
+    try:
+        if os.path.exists(LOGO_PATH):
+            logo_width = Inches(1.5)
+            logo_height = Inches(0.75)
+            logo_left = Inches(0.3)
+            logo_top = prs.slide_height - logo_height - Inches(0.3)
+            slide.shapes.add_picture(LOGO_PATH, logo_left, logo_top, logo_width, logo_height)
+    except Exception as e:
+        pass  # Logo addition failed, continue without it
+
+
+def generate_ppt(pdf_pages, excel_df, cad_image_paths, nx_model_groups, output_path):
+    """
+    Main function to generate the entire PowerPoint presentation with the corrected slide order
+    and dynamic outline.
+    """
+    global prs
     prs = Presentation()
-    
-    # Set slide dimensions (16:9 aspect ratio)
     prs.slide_width = Inches(13.33)
     prs.slide_height = Inches(7.5)
-    
-    # Title Slide
-    create_title_slide(prs)
-    
-    # 1. PDF Content Slides (FIRST in sequence)
-    create_pdf_content_slides(prs, pdf_info)
-    
-    # 2. Excel Data Slides (SECOND in sequence)
+    blank_layout = prs.slide_layouts[6]
+
+    # --- 1. Front Page Slide ---
+    slide1 = prs.slides.add_slide(blank_layout)
+    try:
+        slide1.shapes.add_picture(SLIDE1_PATH, 0, 0, prs.slide_width, prs.slide_height)
+    except Exception:
+        st.warning(f"Could not find {SLIDE1_PATH}. Slide 1 will be blank.")
+
+    # --- 2. Dynamic Outline Slide ---
+    outline_topics = []
+    if pdf_pages:
+        outline_topics.append("Project brief details")
+    outline_topics.append("Minutes of the Meeting")
     if not excel_df.empty:
-        create_excel_slides(prs, excel_df)
-    
-    # 3. CAD Screenshots Slides (THIRD in sequence)
+        outline_topics.append("Design input sheet")
     if cad_image_paths:
-        create_cad_slides(prs, cad_image_paths)
-    
-    # 4. NX Model Slides (FOURTH in sequence)
+        outline_topics.append("Cavity and thread profile details")
     if nx_model_groups:
-        create_nx_model_slides(prs, nx_model_groups)
-    
-    # Save presentation
+        outline_topics.append("3D model images")
+        outline_topics.append("Front & isometric close-up view of tyre images")
+    create_outline_slide(prs, outline_topics)
+
+    # --- 3. pd.png Slide (RESTORED) ---
+    slide2 = prs.slides.add_slide(blank_layout)
+    try:
+        slide2.shapes.add_picture(PD_PATH, 0, 0, prs.slide_width, prs.slide_height)
+    except Exception:
+        st.warning(f"Could not find {PD_PATH}. Slide 3 will be blank.")
+
+    # --- 4. pd2.png Slide ---
+    slide3 = prs.slides.add_slide(blank_layout)
+    try:
+        slide3.shapes.add_picture(PD2_PATH, 0, 0, prs.slide_width, prs.slide_height)
+    except Exception:
+        st.warning(f"Could not find {PD2_PATH}. Slide 4 will be blank.")
+        
+    # --- 5. Minutes of the Meeting Slide ---
+    mom_slide = prs.slides.add_slide(blank_layout)
+    add_slide_banner(mom_slide, "Minutes of the Meeting")
+    try:
+        img_width = Inches(12) 
+        img_height = Inches(6)
+        left = (prs.slide_width - img_width) / 2
+        top = (prs.slide_height - img_height) / 2 + Inches(0.2)
+        mom_slide.shapes.add_picture(MOM_PATH, left, top, width=img_width, height=img_height)
+    except Exception:
+        st.warning(f"Could not find {MOM_PATH}. MOM slide will be blank.")
+
+    # --- Content Sections ---
+    if pdf_pages:
+        create_pdf_content_slides(prs, pdf_pages, section_title="Project brief details")
+    if not excel_df.empty:
+        create_excel_slides(prs, excel_df, section_title="Design input sheet:")
+    if cad_image_paths:
+        create_cad_slides(prs, cad_image_paths, section_title="Cavity and thread profile details")
+    if nx_model_groups:
+        create_nx_model_slides(prs, nx_model_groups, section_title="3D model images")
+        # Add close-up view slide right after 3D model slides
+        create_nx_closeup_slide(prs, nx_model_groups, section_title="Front & isometric close-up view of tyre images")
+
+    # --- Final Thank You Slide ---
+    thank_slide = prs.slides.add_slide(blank_layout)
+    try:
+        thank_slide.shapes.add_picture(LASTSLIDE_PATH, 0, 0, prs.slide_width, prs.slide_height)
+    except Exception:
+        st.warning(f"Could not find {LASTSLIDE_PATH}. Final slide will be blank.")
+
     prs.save(output_path)
 
-def create_title_slide(prs):
-    """Create title slide with Apollo Tyres branding - logo at top, title centered"""
-    # Use blank layout to have full control
-    slide_layout = prs.slide_layouts[6]  # Blank layout
-    slide = prs.slides.add_slide(slide_layout)
+def create_pdf_content_slides(prs, pdf_pages, section_title):
+    """
+    FIXED: Creates multiple slides for PDF content with proper text distribution using WORD COUNT method.
+    """
+    blank_layout = prs.slide_layouts[6]
     
-    # Add logo at the top center if available
-    try:
-        if os.path.exists("apollo_logo.png"):
-            # Logo positioned at top center
-            logo_left = Inches(5.5)  # Center horizontally
-            logo_top = Inches(0.5)   # Top of slide
-            logo_width = Inches(2.33)
-            logo_height = Inches(1.17)
-            slide.shapes.add_picture("apollo_logo.png", logo_left, logo_top, logo_width, logo_height)
-    except:
-        # Fallback text logo at top
-        logo_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(12.33), Inches(1))
-        logo_frame = logo_box.text_frame
-        logo_frame.text = "🏎️ APOLLO TYRES LTD"
-        logo_frame.paragraphs[0].font.size = Pt(28)
-        logo_frame.paragraphs[0].font.bold = True
-        logo_frame.paragraphs[0].font.color.rgb = RGBColor(138, 43, 226)
-        logo_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
-    
-    # Main title centered on slide
-    title_box = slide.shapes.add_textbox(Inches(1), Inches(2.5), Inches(11.33), Inches(1.5))
-    title_frame = title_box.text_frame
-    title_frame.text = "Enhanced Tyre Design Proposal Report"
-    title_frame.paragraphs[0].font.size = Pt(44)
-    title_frame.paragraphs[0].font.bold = True
-    title_frame.paragraphs[0].font.color.rgb = RGBColor(138, 43, 226)
-    title_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
-    
-    # Subtitle below main title
-    subtitle_box = slide.shapes.add_textbox(Inches(1), Inches(4.5), Inches(11.33), Inches(1.5))
-    subtitle_frame = subtitle_box.text_frame
-    subtitle_frame.text = "Comprehensive Analysis & Design Documentation"
-    subtitle_frame.paragraphs[0].font.size = Pt(24)
-    subtitle_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
-
-def create_pdf_content_slides(prs, pdf_info):
-    """Create slides for PDF content with proper text wrapping and pagination"""
-    if not pdf_info:
-        return
-    
-    # Use blank layout to avoid "Click to add title" placeholders
-    slide_layout = prs.slide_layouts[6]  # Blank layout
-    
-    for page_idx, page_content in enumerate(pdf_info):
-        # Split content into manageable chunks (max 800 characters per slide)
-        content_chunks = split_text_for_slides(page_content, max_chars=800)
+    for page_idx, (page_rect, page_elements) in enumerate(pdf_pages):
+        # Extract all text content first
+        all_text_content = []
+        for element in page_elements:
+            if element["type"] == "text" and element["text"].strip():
+                all_text_content.append(element["text"].strip())
         
-        for chunk_idx, chunk in enumerate(content_chunks):
-            slide = prs.slides.add_slide(slide_layout)
+        # Join all text
+        full_text = " ".join(all_text_content)
+        
+        # Split text by WORD COUNT - much more reliable
+        words = full_text.split()
+        words_per_slide = 80  # Conservative word count per slide
+        
+        # Create word chunks
+        word_chunks = []
+        for i in range(0, len(words), words_per_slide):
+            chunk = words[i:i + words_per_slide]
+            word_chunks.append(" ".join(chunk))
+        
+        # Ensure we have at least one chunk
+        if not word_chunks:
+            word_chunks = [full_text] if full_text.strip() else ["No content available"]
+        
+        # Create slides for each word chunk
+        for chunk_idx, chunk_text in enumerate(word_chunks):
+            slide = prs.slides.add_slide(blank_layout)
             
-            # Add custom title using textbox (no placeholder)
-            title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.2), Inches(12.33), Inches(0.8))
-            title_frame = title_box.text_frame
-            title_text = f"PDF Content - Page {page_idx + 1}"
-            if len(content_chunks) > 1:
-                title_text += f" (Part {chunk_idx + 1})"
-            title_frame.text = title_text
-            title_frame.paragraphs[0].font.size = Pt(32)
-            title_frame.paragraphs[0].font.bold = True
-            title_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
+            # Add slide title
+            if len(word_chunks) > 1:
+                title = f"{section_title} - Page {page_idx + 1} (Part {chunk_idx + 1}/{len(word_chunks)})"
+            else:
+                title = f"{section_title} - Page {page_idx + 1}"
             
-            # Add content using textbox (no placeholder)
-            content_box = slide.shapes.add_textbox(Inches(0.5), Inches(1.2), Inches(12.33), Inches(5.8))
-            content_frame = content_box.text_frame
+            add_slide_banner(slide, title)
             
-            # Split into paragraphs and add to slide
-            paragraphs = chunk.split('\n')
-            for para_idx, paragraph in enumerate(paragraphs):
-                if paragraph.strip():
-                    if para_idx > 0:
-                        p = content_frame.add_paragraph()
-                    else:
-                        p = content_frame.paragraphs[0]
-                    
-                    # Wrap long lines
-                    wrapped_lines = textwrap.wrap(paragraph, width=80)
-                    p.text = '\n'.join(wrapped_lines)
-                    p.font.size = Pt(14)
-                    p.space_after = Pt(6)
-
-def create_cad_slides(prs, cad_image_paths):
-    """Create slides for CAD screenshots using blank layout"""
-    slide_layout = prs.slide_layouts[6]  # Blank layout
-    
-    for i, cad_path in enumerate(cad_image_paths):
-        if cad_path and os.path.exists(cad_path):
-            slide = prs.slides.add_slide(slide_layout)
+            # Add text content with FIXED height
+            content_top = Inches(1.0)
+            content_height = Inches(5.5)  # Fixed height to prevent overflow
             
-            # Add custom title using textbox
-            title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.2), Inches(12.33), Inches(0.8))
-            title_frame = title_box.text_frame
-            title_frame.text = f"2D CAD Drawing {i + 1}"
-            title_frame.paragraphs[0].font.size = Pt(32)
-            title_frame.paragraphs[0].font.bold = True
-            title_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
+            text_box = slide.shapes.add_textbox(
+                Inches(0.5),
+                content_top,
+                Inches(12.33),
+                content_height
+            )
             
-            # Add image - centered and properly sized
-            try:
-                img_left = Inches(1.5)
-                img_top = Inches(1.5)
-                img_width = Inches(10.33)
-                img_height = Inches(5.5)
+            text_frame = text_box.text_frame
+            text_frame.clear()
+            text_frame.word_wrap = True
+            text_frame.auto_size = MSO_AUTO_SIZE.NONE  # Prevent auto-sizing
+            
+            # Add text as one paragraph to prevent overflow
+            p = text_frame.paragraphs[0]
+            p.text = chunk_text
+            p.font.size = Pt(14)
+            p.space_after = Pt(6)
+            p.line_spacing = 1.2
+            p.alignment = PP_ALIGN.LEFT
+        
+        # Handle images on separate slides
+        image_count = 0
+        for element in page_elements:
+            if element["type"] == "image":
+                image_count += 1
+                slide = prs.slides.add_slide(blank_layout)
+                add_slide_banner(slide, f"{section_title} - Page {page_idx + 1} - Image {image_count}")
                 
-                slide.shapes.add_picture(cad_path, img_left, img_top, img_width, img_height)
-            except Exception as e:
-                # Add error text if image fails to load
-                error_box = slide.shapes.add_textbox(Inches(4), Inches(3), Inches(5), Inches(1))
-                error_frame = error_box.text_frame
-                error_frame.text = f"Error loading CAD image {i + 1}"
-                error_frame.paragraphs[0].font.size = Pt(16)
-                error_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
-
-def create_nx_model_slides(prs, nx_model_groups):
-    """Create slides for NX models with 2x2 grid layout using blank layout"""
-    slide_layout = prs.slide_layouts[6]  # Blank layout
-    
-    for group_idx, model_group in enumerate(nx_model_groups):
-        slide = prs.slides.add_slide(slide_layout)
-        
-        # Add custom title using textbox
-        title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.1), Inches(12.33), Inches(0.7))
-        title_frame = title_box.text_frame
-        title_frame.text = f"3D NX Model {group_idx + 1} - Multiple Views"
-        title_frame.paragraphs[0].font.size = Pt(28)
-        title_frame.paragraphs[0].font.bold = True
-        title_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
-        
-        # Create 2x2 grid for up to 4 images
-        view_names = ['Top View', 'Front View', 'Right View', 'Isometric View']
-        positions = [
-            (Inches(0.8), Inches(1.2)),   # Top-left
-            (Inches(6.8), Inches(1.2)),   # Top-right
-            (Inches(0.8), Inches(4.2)),   # Bottom-left
-            (Inches(6.8), Inches(4.2))    # Bottom-right
-        ]
-        
-        img_width = Inches(5.5)
-        img_height = Inches(2.8)
-        
-        for i, (img_path, view_name, (left, top)) in enumerate(zip(model_group[:4], view_names, positions)):
-            if os.path.exists(img_path):
                 try:
-                    # Add image
-                    slide.shapes.add_picture(img_path, left, top, img_width, img_height)
+                    img_width = Inches(10)
+                    img_height = Inches(5)
+                    img_left = (prs.slide_width - img_width) / 2
+                    img_top = Inches(1.5)
                     
-                    # Add view label using textbox
-                    label_box = slide.shapes.add_textbox(left, top - Inches(0.3), img_width, Inches(0.25))
-                    label_frame = label_box.text_frame
-                    label_frame.text = view_name
-                    label_frame.paragraphs[0].font.size = Pt(12)
-                    label_frame.paragraphs[0].font.bold = True
-                    label_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
-                    
+                    image_stream = io.BytesIO(element["bytes"])
+                    slide.shapes.add_picture(image_stream, img_left, img_top, img_width, img_height)
                 except Exception as e:
-                    # Add placeholder if image fails
-                    placeholder = slide.shapes.add_shape(
-                        MSO_SHAPE.RECTANGLE, left, top, img_width, img_height
-                    )
-                    placeholder.fill.solid()
-                    placeholder.fill.fore_color.rgb = RGBColor(200, 200, 200)
-                    
-                    # Add error text using textbox
-                    error_box = slide.shapes.add_textbox(left, top + Inches(1), img_width, Inches(0.5))
-                    error_frame = error_box.text_frame
-                    error_frame.text = f"Image Error\n{view_name}"
-                    error_frame.paragraphs[0].font.size = Pt(10)
-                    error_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
+                    print(f"Could not add PDF image to slide: {e}")
 
-def create_excel_slides(prs, excel_df):
-    """Create slides for Excel data with proper table formatting and pagination using blank layout"""
+def create_excel_slides(prs, excel_df, section_title):
+    """
+    Creates slides for Excel data with pagination.
+    """
     if excel_df.empty:
         return
     
-    slide_layout = prs.slide_layouts[6]  # Blank layout
-    
-    # Calculate rows per slide (accounting for header and slide dimensions)
-    max_rows_per_slide = 12  # Conservative estimate for readability
-    
-    # Split dataframe into chunks
+    blank_layout = prs.slide_layouts[6]
+    max_rows_per_slide = 20
     total_rows = len(excel_df)
     num_slides = (total_rows + max_rows_per_slide - 1) // max_rows_per_slide
-    
+
     for slide_idx in range(num_slides):
-        slide = prs.slides.add_slide(slide_layout)
-        
-        # Add custom title using textbox
-        title_text = "Tyre Specifications"
+        slide = prs.slides.add_slide(blank_layout)
+        title_text = section_title
         if num_slides > 1:
             title_text += f" (Page {slide_idx + 1}/{num_slides})"
-            
-        title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.2), Inches(12.33), Inches(0.8))
-        title_frame = title_box.text_frame
-        title_frame.text = title_text
-        title_frame.paragraphs[0].font.size = Pt(28)
-        title_frame.paragraphs[0].font.bold = True
-        title_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
-        
-        # Calculate data slice for this slide
+        add_slide_banner(slide, title_text)
+
         start_row = slide_idx * max_rows_per_slide
         end_row = min(start_row + max_rows_per_slide, total_rows)
         df_slice = excel_df.iloc[start_row:end_row]
-        
-        # Create table
-        rows = len(df_slice) + 1  # +1 for header
-        cols = len(df_slice.columns)
-        
-        # Add table shape
+
+        rows, cols = df_slice.shape
+        rows += 1
+
         table_left = Inches(0.5)
         table_top = Inches(1.2)
-        table_width = Inches(12.33)
-        table_height = Inches(5.8)
-        
+        table_width = prs.slide_width - Inches(1.0)
+        table_height = prs.slide_height - Inches(1.5)
+
         table_shape = slide.shapes.add_table(rows, cols, table_left, table_top, table_width, table_height)
         table = table_shape.table
-        
-        # Set column widths
-        col_width = table_width / cols
-        for col_idx in range(cols):
-            table.columns[col_idx].width = int(col_width)
-        
-        # Add header row
-        for col_idx, column_name in enumerate(df_slice.columns):
-            cell = table.cell(0, col_idx)
-            cell.text = str(column_name)
-            cell.text_frame.paragraphs[0].font.bold = True
-            cell.text_frame.paragraphs[0].font.size = Pt(10)
+
+        for c in range(cols):
+            table.columns[c].width = int(table_width / cols)
+
+        for c, col_name in enumerate(df_slice.columns):
+            cell = table.cell(0, c)
+            p = cell.text_frame.paragraphs[0]
+            p.text = str(col_name)
+            p.font.bold = True
+            p.font.size = Pt(10)
+            p.alignment = PP_ALIGN.CENTER
             cell.fill.solid()
-            cell.fill.fore_color.rgb = RGBColor(138, 43, 226)  # Purple header
-            cell.text_frame.paragraphs[0].font.color.rgb = RGBColor(255, 255, 255)  # White text
-        
-        # Add data rows
-        for row_idx, (_, row_data) in enumerate(df_slice.iterrows()):
-            for col_idx, value in enumerate(row_data):
-                cell = table.cell(row_idx + 1, col_idx)
-                # Truncate long values to fit
-                cell_text = str(value)
-                if len(cell_text) > 20:
-                    cell_text = cell_text[:17] + "..."
-                cell.text = cell_text
-                cell.text_frame.paragraphs[0].font.size = Pt(9)
+            cell.fill.fore_color.rgb = RGBColor(138, 43, 226)
+            p.font.color.rgb = RGBColor(255, 255, 255)
 
-def split_text_for_slides(text, max_chars=800):
-    """Split long text into chunks suitable for slides"""
-    if len(text) <= max_chars:
-        return [text]
-    
-    # Split by paragraphs first
-    paragraphs = text.split('\n')
-    chunks = []
-    current_chunk = ""
-    
-    for paragraph in paragraphs:
-        # If adding this paragraph would exceed the limit, start a new chunk
-        if len(current_chunk) + len(paragraph) + 1 > max_chars and current_chunk:
-            chunks.append(current_chunk.strip())
-            current_chunk = paragraph
-        else:
-            if current_chunk:
-                current_chunk += "\n" + paragraph
-            else:
-                current_chunk = paragraph
-    
-    # Add the last chunk
-    if current_chunk:
-        chunks.append(current_chunk.strip())
-    
-    return chunks
+        for r, row_data in enumerate(df_slice.itertuples(index=False)):
+            for c, value in enumerate(row_data):
+                cell = table.cell(r + 1, c)
+                p = cell.text_frame.paragraphs[0]
+                p.text = str(value) if pd.notna(value) else ""
+                p.font.size = Pt(9)
+                p.alignment = PP_ALIGN.CENTER
 
-# ---------- PDF Report Generator ----------
-def generate_pdf(pdf_info, excel_df, cad_image_paths, nx_model_groups, output_path):
+
+def create_cad_slides(prs, cad_image_paths, section_title):
     """
-    Enhanced PDF generation with grid layout for NX screenshots
+    Creates a slide for each CAD screenshot, ensuring it uses the full content width.
     """
-    doc = SimpleDocTemplate(output_path, pagesize=A4, 
-                          topMargin=72, bottomMargin=72, leftMargin=72, rightMargin=72)
-    styles = getSampleStyleSheet()
-    elements = []
+    slide_layout = prs.slide_layouts[6]
+    for i, cad_path in enumerate(cad_image_paths):
+        if cad_path and os.path.exists(cad_path):
+            slide = prs.slides.add_slide(slide_layout)
+            add_slide_banner(slide, f"{section_title} - Drawing {i+1}")
+            
+            content_area_top = Inches(0.8)
+            content_area_height = prs.slide_height - content_area_top
+            
+            try:
+                display_w = prs.slide_width
+                
+                img = PILImage.open(cad_path)
+                aspect = img.height / img.width
+                display_h = display_w * aspect
 
-    # Add Apollo Tyres Logo at the top center
-    try:
-        if os.path.exists("apollo_logo.png"):
-            logo = Image("apollo_logo.png", width=150, height=75)
-            logo.hAlign = 'CENTER'
-            elements.append(logo)
-            elements.append(Spacer(1, 20))
-        else:
-            elements.append(Paragraph("<b>APOLLO TYRES LTD</b>", styles["Title"]))
-            elements.append(Spacer(1, 10))
-    except Exception as e:
-        elements.append(Paragraph("<b>APOLLO TYRES LTD</b>", styles["Title"]))
-        elements.append(Spacer(1, 10))
+                left = 0
+                top = content_area_top + (content_area_height - display_h) / 2
+                
+                if top < content_area_top:
+                    top = content_area_top
+                    display_h = content_area_height
+                    display_w = display_h / aspect
+                    left = (prs.slide_width - display_w) / 2
 
-    # Title
-    elements.append(Paragraph("<b>Enhanced Tyre Design Proposal Report</b>", styles["Title"]))
-    elements.append(Spacer(1, 20))
+                slide.shapes.add_picture(cad_path, left, top, width=display_w)
+            except Exception as e:
+                st.error(f"Error adding CAD image {i+1}: {e}")
+
+def create_nx_model_slides(prs, nx_model_groups, section_title):
+    """
+    Creates a slide for each NX model, arranging the three views horizontally
+    with section name on top and proper view labels: Front View, Back View, Isometric View.
+    """
+    slide_layout = prs.slide_layouts[6]
+    for group_idx, model_group in enumerate(nx_model_groups):
+        if len(model_group) < 3: continue
+
+        slide = prs.slides.add_slide(slide_layout)
+        add_slide_banner(slide, f"{section_title} - Model {group_idx + 1}")
+        
+        total_content_width = prs.slide_width - Inches(1.0)
+        gap = Inches(0.15)
+        
+        image_width = (total_content_width - (2 * gap)) / 3
+        
+        view_paths = model_group[:3]
+        # Updated view names as requested: Front, Back, Isometric
+        view_names = ['Front View', 'Back View', 'Isometric View']
+        
+        current_left = Inches(0.5)
+        
+        for i, img_path in enumerate(view_paths):
+            try:
+                img = PILImage.open(img_path)
+                aspect_ratio = img.height / img.width
+                image_height = image_width * aspect_ratio
+
+                top = Inches(1.0) + ((prs.slide_height - Inches(1.0) - image_height) / 2)
+
+                slide.shapes.add_picture(img_path, current_left, top, width=image_width, height=image_height)
+                
+                # Add view name label below each image
+                label_top = top + image_height + Inches(0.1)
+                label_box = slide.shapes.add_textbox(current_left, label_top, image_width, Inches(0.3))
+                label_frame = label_box.text_frame
+                p = label_frame.paragraphs[0]
+                p.text = view_names[i] if i < len(view_names) else f"View {i+1}"
+                p.font.size = Pt(14)
+                p.font.bold = True
+                p.alignment = PP_ALIGN.CENTER
+                
+                current_left += image_width + gap
+
+            except Exception as e:
+                st.error(f"Could not add NX image {i+1} to slide: {e}")
+
+def create_nx_closeup_slide(prs, nx_model_groups, section_title):
+    """
+    Creates a close-up slide showing Front and Isometric views side by side
+    with IMPROVED FRONT VIEW cropping to show full tire width.
+    """
+    if not nx_model_groups or len(nx_model_groups) == 0:
+        return
     
-    # PDF Content Section
-    elements.append(Paragraph("Extracted PDF Content:", styles["Heading2"]))
-    elements.append(Spacer(1, 6))
-    for i, pg in enumerate(pdf_info):
-        elements.append(Paragraph(pg.replace('\n', '<br/>'), styles["Normal"]))
-        if i < len(pdf_info) - 1:
-            elements.append(Spacer(1, 6))
-
-    elements.append(Spacer(1, 15))
-
-    # Excel data Section
-    if not excel_df.empty:
-        elements.append(Paragraph("Tyre Specifications:", styles["Heading2"]))
-        elements.append(Spacer(1, 6))
-        data = [excel_df.columns.tolist()] + excel_df.astype(str).values.tolist()
-        table = Table(data)
-        table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("BOTTOMPADDING", (0, 0), (-1, 0), 12),
-            ("GRID", (0, 0), (-1, -1), 1, colors.black),
-        ]))
-        elements.append(table)
-        elements.append(Spacer(1, 15))
-
-    # Multiple CAD Screenshots Section
-    if cad_image_paths:
-        elements.append(Paragraph("2D CAD File Screenshots:", styles["Heading2"]))
-        elements.append(Spacer(1, 6))
+    slide_layout = prs.slide_layouts[6]
+    slide = prs.slides.add_slide(slide_layout)
+    
+    # Add header banner
+    add_slide_banner(slide, section_title)
+    
+    # Get first model group
+    model_group = nx_model_groups[0]
+    
+    if len(model_group) >= 3:
+        # Front view (index 1) and Isometric view (index 2)
+        front_view_path = model_group[1]  # Front View
+        isometric_view_path = model_group[2]  # Isometric View
         
-        for i, cad_path in enumerate(cad_image_paths):
-            if cad_path and os.path.exists(cad_path):
-                elements.append(Paragraph(f"CAD Drawing {i+1}:", styles["Normal"]))
-                elements.append(Spacer(1, 3))
-                elements.append(Image(cad_path, width=300, height=200))
-                elements.append(Spacer(1, 10))
-
-    # Multiple NX Screenshots Section with Grid Layout
-    if nx_model_groups:
-        elements.append(Paragraph("3D NX File Screenshots:", styles["Heading2"]))
-        elements.append(Spacer(1, 6))
+        # Calculate positions for side-by-side layout
+        gap = Inches(0.5)
+        image_width = (prs.slide_width - Inches(1.0) - gap) / 2
         
-        for group_idx, model_group in enumerate(nx_model_groups):
-            elements.append(Paragraph(f"NX 3D Model {group_idx + 1}:", styles["Normal"]))
-            elements.append(Spacer(1, 6))
-            
-            # Create 2x2 grid for each model group (4 views)
-            if len(model_group) >= 4:
-                # Create table data for 2x2 grid
-                grid_data = []
+        # Left image (Front view)
+        left_img_left = Inches(0.5)
+        # Right image (Isometric view)  
+        right_img_left = left_img_left + image_width + gap
+        
+        content_top = Inches(1.2)
+        available_height = prs.slide_height - content_top - Inches(1.0)  # Leave space for labels
+        
+        def create_front_view_crop(img_path, zoom_factor=1.8):
+            """Create a VERTICAL STRIP crop for front view to show full tire width"""
+            try:
+                img = PILImage.open(img_path)
+                width, height = img.size
                 
-                # Row 1: First two images
-                row1 = []
-                for i in range(2):
-                    if i < len(model_group) and os.path.exists(model_group[i]):
-                        img = Image(model_group[i], width=140, height=100)
-                        row1.append(img)
-                    else:
-                        row1.append("")
-                grid_data.append(row1)
+                # For front view, we want a vertical strip showing the full tire width
+                # Take a vertical slice from the center
+                slice_width = int(width / zoom_factor)
+                center_x = width // 2
                 
-                # Row 2: Next two images
-                row2 = []
-                for i in range(2, 4):
-                    if i < len(model_group) and os.path.exists(model_group[i]):
-                        img = Image(model_group[i], width=140, height=100)
-                        row2.append(img)
-                    else:
-                        row2.append("")
-                grid_data.append(row2)
+                # Calculate vertical strip boundaries
+                left = max(0, center_x - slice_width // 2)
+                right = min(width, center_x + slice_width // 2)
+                top = 0  # Keep full height
+                bottom = height  # Keep full height
                 
-                # Create table with 2x2 grid
-                grid_table = Table(grid_data, colWidths=[150, 150])
-                grid_table.setStyle(TableStyle([
-                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                    ('GRID', (0, 0), (-1, -1), 1, colors.lightgrey),
-                    ('LEFTPADDING', (0, 0), (-1, -1), 5),
-                    ('RIGHTPADDING', (0, 0), (-1, -1), 5),
-                    ('TOPPADDING', (0, 0), (-1, -1), 5),
-                    ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
-                ]))
+                # Crop to vertical strip and resize for clarity
+                cropped = img.crop((left, top, right, bottom))
+                # Resize to emphasize the tire pattern
+                resized = cropped.resize((width, height), PILImage.Resampling.LANCZOS)
                 
-                elements.append(grid_table)
-            else:
-                # Fallback for less than 4 images - display them normally
-                for img_path in model_group:
-                    if os.path.exists(img_path):
-                        elements.append(Image(img_path, width=200, height=150))
-                        elements.append(Spacer(1, 5))
-            
-            elements.append(Spacer(1, 15))
+                # Save cropped image
+                cropped_path = img_path.replace('.png', '_front_strip.png')
+                resized.save(cropped_path)
+                return cropped_path
+            except Exception as e:
+                print(f"Error creating front view crop: {e}")
+                return img_path
+        
+        def create_center_cropped_zoomed_image(img_path, zoom_factor=2.0):
+            """Create a center-cropped zoomed version for isometric view"""
+            try:
+                img = PILImage.open(img_path)
+                width, height = img.size
+                
+                # Find center of image
+                center_x = width // 2
+                center_y = height // 2
+                
+                # Calculate crop dimensions for zoom
+                crop_width = int(width / zoom_factor)
+                crop_height = int(height / zoom_factor)
+                
+                # Ensure center crop
+                left = max(0, center_x - crop_width // 2)
+                top = max(0, center_y - crop_height // 2)
+                right = min(width, left + crop_width)
+                bottom = min(height, top + crop_height)
+                
+                # Adjust if crop goes beyond image boundaries
+                if right > width:
+                    right = width
+                    left = right - crop_width
+                if bottom > height:
+                    bottom = height
+                    top = bottom - crop_height
+                if left < 0:
+                    left = 0
+                    right = left + crop_width
+                if top < 0:
+                    top = 0
+                    bottom = top + crop_height
+                
+                # Crop from center and resize for zoom effect
+                cropped = img.crop((left, top, right, bottom))
+                zoomed = cropped.resize((width, height), PILImage.Resampling.LANCZOS)
+                
+                # Save zoomed image
+                zoomed_path = img_path.replace('.png', '_center_zoomed.png')
+                zoomed.save(zoomed_path)
+                return zoomed_path
+            except Exception as e:
+                print(f"Error creating center zoomed image: {e}")
+                return img_path
+        
+        # Add Front view (vertical strip crop to show full tire width)
+        try:
+            if os.path.exists(front_view_path):
+                cropped_front_path = create_front_view_crop(front_view_path, zoom_factor=1.8)
+                
+                img = PILImage.open(cropped_front_path)
+                aspect_ratio = img.height / img.width
+                image_height = min(image_width * aspect_ratio, available_height - Inches(0.5))
+                
+                top_pos = content_top + (available_height - image_height - Inches(0.5)) / 2
+                
+                slide.shapes.add_picture(cropped_front_path, left_img_left, top_pos, 
+                                       width=image_width, height=image_height)
+                
+                # Add "Front View" label below the image
+                label_top = top_pos + image_height + Inches(0.1)
+                label_box = slide.shapes.add_textbox(left_img_left, label_top, image_width, Inches(0.4))
+                label_frame = label_box.text_frame
+                p = label_frame.paragraphs[0]
+                p.text = "Front View"
+                p.font.size = Pt(16)
+                p.font.bold = True
+                p.alignment = PP_ALIGN.CENTER
+                
+        except Exception as e:
+            st.error(f"Error adding improved front view: {e}")
+        
+        # Add Isometric view (center-cropped and zoomed)
+        try:
+            if os.path.exists(isometric_view_path):
+                zoomed_iso_path = create_center_cropped_zoomed_image(isometric_view_path, zoom_factor=2.5)
+                
+                img = PILImage.open(zoomed_iso_path)
+                aspect_ratio = img.height / img.width
+                image_height = min(image_width * aspect_ratio, available_height - Inches(0.5))
+                
+                top_pos = content_top + (available_height - image_height - Inches(0.5)) / 2
+                
+                slide.shapes.add_picture(zoomed_iso_path, right_img_left, top_pos, 
+                                       width=image_width, height=image_height)
+                
+                # Add "Isometric View" label below the image
+                label_top = top_pos + image_height + Inches(0.1)
+                label_box = slide.shapes.add_textbox(right_img_left, label_top, image_width, Inches(0.4))
+                label_frame = label_box.text_frame
+                p = label_frame.paragraphs[0]
+                p.text = "Isometric View"
+                p.font.size = Pt(16)
+                p.font.bold = True
+                p.alignment = PP_ALIGN.CENTER
+                
+        except Exception as e:
+            st.error(f"Error adding zoomed isometric view: {e}")
 
-    doc.build(elements)
 
 # ---------- STREAMLIT GUI ----------
 def main():
     """
-    Main Streamlit application with multiple file support
+    The main function that runs the Streamlit application.
     """
-    # Add logo at the top center
     add_logo_to_streamlit()
-
     st.title("Enhanced Tyre Report Generator")
-
-    # Initialize session state
     initialize_session_state()
 
-    # Create tabs
     tab1, tab2, tab3 = st.tabs([
         "📸 Capture CAD Drawing", 
         "📐 Capture NX 3D Models", 
@@ -778,242 +968,138 @@ def main():
 
     with tab1:
         updated_tab1_section()
-
     with tab2:
         updated_tab2_section()
-
     with tab3:
         updated_tab3_section()
 
-# ---------- TAB SECTIONS ----------
 def updated_tab1_section():
     """
-    Updated CAD section with multiple file upload support
+    UI and logic for the 'Capture CAD Drawing' tab.
     """
     st.header("📸 AutoCAD Drawing Capture")
-    cad_files = st.file_uploader("Upload 2D CAD Files (.dwg)", 
-                               type=["dwg"], 
-                               accept_multiple_files=True,
-                               key="cad_uploader_multiple")
+    cad_files = st.file_uploader("Upload 2D CAD Files (.dwg)", type=["dwg"], accept_multiple_files=True)
     
     if cad_files:
-        st.info(f"📁 {len(cad_files)} CAD file(s) uploaded")
-        
         if st.button("🚀 Process All CAD Files"):
-            cad_screenshot_paths = []
-            
-            with st.spinner('Processing CAD files... Please wait...'):
+            paths = []
+            with st.spinner('Processing CAD files... This is now faster.'):
                 for i, cad_file in enumerate(cad_files):
-                    st.info(f"Processing file {i+1}/{len(cad_files)}: {cad_file.name}")
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".dwg") as tmp:
+                        tmp.write(cad_file.getvalue())
+                        cad_path = tmp.name
                     
-                    cad_temp_dir = tempfile.mkdtemp()
-                    cad_path = os.path.join(cad_temp_dir, cad_file.name)
+                    ss_path = open_autocad_and_capture_screenshot(cad_path)
                     
-                    with open(cad_path, "wb") as f:
-                        f.write(cad_file.read())
-                    
-                    cad_screenshot_path = open_autocad_and_capture_screenshot(cad_path)
-                    
-                    if cad_screenshot_path:
-                        # Rename to include file index
-                        new_path = os.path.join(tempfile.gettempdir(), f"cad_screenshot_{i+1}.png")
-                        shutil.copy2(cad_screenshot_path, new_path)
-                        cad_screenshot_paths.append(new_path)
-                        st.success(f"✅ Captured drawing {i+1}")
+                    try:
+                        os.remove(cad_path)
+                    except OSError as e:
+                        st.warning(f"Could not remove temp file {cad_path}: {e}")
+
+                    if ss_path:
+                        final_path = os.path.join(tempfile.gettempdir(), f"cad_ss_{i}.png")
+                        shutil.copy(ss_path, final_path)
+                        paths.append(final_path)
+                        st.success(f"✅ Captured {cad_file.name}")
                     else:
-                        st.error(f"❌ Failed to capture drawing {i+1}")
-            
-            if cad_screenshot_paths:
-                st.session_state['cad_screenshot_paths'] = cad_screenshot_paths
+                        st.error(f"❌ Failed to capture {cad_file.name}")
+
+            if paths:
+                st.session_state['cad_screenshot_paths'] = paths
                 st.session_state['cad_screenshots_captured'] = True
-                st.success(f"🎉 Successfully captured {len(cad_screenshot_paths)} CAD drawings!")
-                
-                # Display all captured screenshots
-                for i, path in enumerate(cad_screenshot_paths):
-                    st.image(path, caption=f"CAD Drawing {i+1}")
+                st.success("🎉 All CAD drawings captured!")
+                for path in paths:
+                    st.image(path)
 
 def updated_tab2_section():
     """
-    NX section for standard views capture only
+    UI and logic for the 'Capture NX 3D Models' tab.
     """
     st.header("📐 NX 3D Model Capture")
     
-    # Check if NX models have been captured
-    if st.session_state.get('nx_screenshots_captured') and st.session_state.get('nx_model_groups'):
-        st.success(f"✅ Currently have {len(st.session_state['nx_model_groups'])} NX model(s) captured")
-        
-        with st.expander("View Captured NX Models"):
-            for group_idx, model_group in enumerate(st.session_state['nx_model_groups']):
-                st.subheader(f"NX Model {group_idx + 1}")
-                for i, path in enumerate(model_group):
-                    if os.path.exists(path):
-                        view_names = ['Top View', 'Front View', 'Right View', 'Isometric View']
-                        view_name = view_names[i] if i < len(view_names) else f"View {i+1}"
-                        st.image(path, caption=view_name)
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        if st.button("🚀 Open NX and Capture Views", key="nx_capture_manual_btn"):
-            # Clear previous captures
-            if 'nx_model_groups' in st.session_state:
-                for model_group in st.session_state['nx_model_groups']:
-                    for path in model_group:
-                        try:
-                            if os.path.exists(path):
-                                os.remove(path)
-                        except:
-                            pass
-            
-            st.session_state['nx_model_groups'] = []
-            st.session_state['nx_screenshots_captured'] = False
-            
-            views = open_nx_and_capture_views_manual("", manual_file_open=True)
+    if st.session_state.get('nx_model_groups'):
+        st.success(f"✅ {len(st.session_state.get('nx_model_groups', []))} NX model(s) captured.")
+        with st.expander("View Captured Models"):
+            for i, model_group in enumerate(st.session_state.get('nx_model_groups', [])):
+                st.subheader(f"Model {i+1}")
+                cols = st.columns(len(model_group))
+                for col, path in zip(cols, model_group):
+                    col.image(path)
 
-            if views:
-                st.success("✅ All 3D views captured successfully from NX!")
-                
-                model_group = []
-                for view_name, view_path in views.items():
-                    if os.path.exists(view_path):
-                        model_group.append(view_path)
-                
-                st.session_state['nx_model_groups'] = [model_group]
-                st.session_state['nx_screenshots_captured'] = True
-                
-                with st.expander("View All Captured Screenshots"):
-                    for name, path in views.items():
-                        if os.path.exists(path):
-                            st.image(path, caption=f"{name.capitalize()} View")
-            else:
-                st.error("Failed to capture 3D views from NX.")
-    
-    with col2:
-        if st.button("🔄 Add Another NX Model", key="nx_add_another_btn"):
-            views = open_nx_and_capture_views_manual("", manual_file_open=True)
-
-            if views:
-                st.success("✅ Additional 3D views captured successfully!")
-                
-                model_group = []
-                for view_name, view_path in views.items():
-                    if os.path.exists(view_path):
-                        model_group.append(view_path)
-                
-                existing_groups = st.session_state.get('nx_model_groups', [])
-                existing_groups.append(model_group)
-                st.session_state['nx_model_groups'] = existing_groups
-                st.session_state['nx_screenshots_captured'] = True
-                
-                with st.expander("View Newly Captured Screenshots"):
-                    for name, path in views.items():
-                        if os.path.exists(path):
-                            st.image(path, caption=f"{name.capitalize()} View - Model {len(existing_groups)}")
-            else:
-                st.error("Failed to capture additional 3D views from NX.")
-    
     if st.session_state.get('nx_screenshots_captured'):
-        st.markdown("---")
-        if st.button("🗑️ Clear All NX Captures", key="clear_nx_btn"):
-            for model_group in st.session_state.get('nx_model_groups', []):
-                for path in model_group:
-                    try:
-                        if os.path.exists(path):
-                            os.remove(path)
-                    except:
-                        pass
-            
+        if st.button("🗑️ Clear All NX Captures"):
             st.session_state['nx_model_groups'] = []
             st.session_state['nx_screenshots_captured'] = False
-            st.success("✅ All NX captures cleared!")
             st.rerun()
+
+    if st.button("🚀 Capture New NX Model"):
+        with st.spinner("Waiting for NX automation..."):
+            views = open_nx_and_capture_views_manual()
+            if views and len(views) == 3:
+                model_group = [views[v] for v in ['Top View', 'Front View', 'Isometric View']]
+                st.session_state.setdefault('nx_model_groups', []).append(model_group)
+                st.session_state['nx_screenshots_captured'] = True
+                st.success("✅ Capture complete! Please return to the Streamlit app.")
+                st.rerun()
+            else:
+                st.error("❌ Failed to capture all 3 required views from NX.")
 
 def updated_tab3_section():
     """
-    Updated report generation section with PowerPoint output
+    UI and logic for the 'Generate Reports' tab.
     """
     st.header("📄 Generate Enhanced Reports")
     
-    pdf_files = st.file_uploader("Upload PDF Files (Specs)", 
-                               type=["pdf"], 
-                               accept_multiple_files=True,
-                               key="pdf_uploader_multiple")
-    excel_files = st.file_uploader("Upload Excel Files (Specifications)", 
-                                 type=["xlsx"], 
-                                 accept_multiple_files=True,
-                                 key="excel_uploader_multiple")
-    
-    # Status indicators with count
-    col1, col2 = st.columns(2)
-    with col1:
-        cad_count = len(st.session_state.get('cad_screenshot_paths', []))
-        cad_status = f"✅ {cad_count} drawings ready" if st.session_state.get('cad_screenshots_captured') else "❌ Not captured"
-        st.info(f"CAD Drawings: {cad_status}")
-    
-    with col2:
-        nx_groups = st.session_state.get('nx_model_groups', [])
-        nx_count = len(nx_groups)
-        nx_status = f"✅ {nx_count} models ready" if st.session_state.get('nx_screenshots_captured') else "❌ Not captured"
-        st.info(f"NX Models: {nx_status}")
+    with st.expander("🔧 Software Configuration (Optional)"):
+        st.info("The app tries to auto-detect software. Use these fields to override.")
+        custom_autocad = st.text_input("Custom AutoCAD Path:", st.session_state.get('custom_autocad_path', ''))
+        st.session_state['custom_autocad_path'] = custom_autocad
         
-    # Generate Report Button
+        custom_nx = st.text_input("Custom NX Path:", st.session_state.get('custom_nx_path', ''))
+        st.session_state['custom_nx_path'] = custom_nx
+
+    pdf_files = st.file_uploader("Upload PDF Files", type=["pdf"], accept_multiple_files=True)
+    excel_files = st.file_uploader("Upload Excel Files", type=["xlsx"], accept_multiple_files=True)
+    
+    st.info(f"CAD Drawings: {'✅ Ready' if st.session_state.get('cad_screenshots_captured') else '❌ Not captured'}")
+    st.info(f"NX Models: {'✅ Ready' if st.session_state.get('nx_screenshots_captured') else '❌ Not captured'}")
+        
     if st.button("🚀 Generate Enhanced PowerPoint Report"):
-        missing_items = []
-        if not pdf_files:
-            missing_items.append("PDF files")
-        if not excel_files:
-            missing_items.append("Excel files")
-        if not st.session_state.get('cad_screenshots_captured'):
-            missing_items.append("CAD drawing captures")
-        if not st.session_state.get('nx_screenshots_captured'):
-            missing_items.append("NX model captures")
-        
-        if missing_items:
-            st.error(f"Missing required items: {', '.join(missing_items)}")
-            st.info("Please complete all sections before generating the report.")
+        if not all([pdf_files, excel_files, st.session_state.get('cad_screenshots_captured'), st.session_state.get('nx_screenshots_captured')]):
+            st.error("Missing one or more inputs. Please provide all files and captures.")
         else:
-            # Generate PowerPoint report
-            with st.spinner("Generating enhanced PowerPoint report... Please wait..."):
+            with st.spinner("Generating report... This may take a moment."):
                 with tempfile.TemporaryDirectory() as tmpdir:
-                    # Process multiple PDF files
-                    all_pdf_info = []
+                    all_pdf_pages = []
                     for pdf_file in pdf_files:
                         pdf_path = os.path.join(tmpdir, pdf_file.name)
                         with open(pdf_path, "wb") as f:
-                            f.write(pdf_file.read())
-                        pdf_info = extract_pdf_info(pdf_path)
-                        all_pdf_info.extend(pdf_info)
+                            f.write(pdf_file.getvalue())
+                        all_pdf_pages.extend(extract_pdf_elements(pdf_path))
                     
-                    # Process multiple Excel files (combine all data)
-                    combined_excel_df = pd.DataFrame()
-                    for excel_file in excel_files:
-                        excel_path = os.path.join(tmpdir, excel_file.name)
-                        with open(excel_path, "wb") as f:
-                            f.write(excel_file.read())
-                        excel_df = read_excel_data(excel_path)
-                        combined_excel_df = pd.concat([combined_excel_df, excel_df], ignore_index=True)
+                    all_excel_df = pd.concat(
+                        [read_excel_data(excel_file) for excel_file in excel_files], 
+                        ignore_index=True
+                    )
                     
-                    # Get image paths and model groups
-                    cad_screenshot_paths = st.session_state.get('cad_screenshot_paths', [])
-                    nx_model_groups = st.session_state.get('nx_model_groups', [])
-                    
-                    # Output path for PowerPoint
                     ppt_out_path = os.path.join(tmpdir, "Enhanced_Tyre_Report.pptx")
                     
-                    # Generate PowerPoint report
-                    generate_ppt(all_pdf_info, combined_excel_df, cad_screenshot_paths, nx_model_groups, ppt_out_path)
+                    generate_ppt(
+                        all_pdf_pages, 
+                        all_excel_df, 
+                        st.session_state.get('cad_screenshot_paths', []), 
+                        st.session_state.get('nx_model_groups', []), 
+                        ppt_out_path
+                    )
                     
-                    # Download button for PowerPoint
                     with open(ppt_out_path, "rb") as f:
                         st.download_button(
                             "📊 Download Enhanced PowerPoint Report", 
                             f, 
-                            file_name="Enhanced_Tyre_Report.pptx", 
+                            file_name="Enhanced_Tyre_Report.pptx",
                             mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
                         )
-            
-            st.success("Enhanced PowerPoint report generated successfully!")
+            st.success("Report generated!")
 
-# ---------- RUN THE APPLICATION ----------
 if __name__ == "__main__":
     main()
