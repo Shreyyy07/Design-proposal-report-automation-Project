@@ -19,6 +19,7 @@ from pptx.enum.shapes import MSO_SHAPE
 import textwrap
 import glob
 import winreg
+import numpy as np
 
 # ---------- ASSET PATHS ----------
 # Define paths for assets to make them easy to change and manage.
@@ -175,6 +176,61 @@ def extract_pdf_elements(pdf_path):
         page_elements.sort(key=lambda el: (el["bbox"][1], el["bbox"][0]))
         pages_elements.append((page.rect, page_elements))
         
+    return pages_elements
+
+
+def extract_pdf_elements_improved(pdf_path):
+    """
+    Improved PDF extraction that better handles text structure and images.
+    """
+    doc = fitz.open(pdf_path)
+    pages_elements = []
+    
+    for page_num, page in enumerate(doc):
+        page_elements = {"text_blocks": [], "images": []}
+        
+        # Extract text blocks (preserves paragraph structure)
+        text_dict = page.get_text("dict")
+        for block in text_dict["blocks"]:
+            if "lines" in block:
+                block_text = ""
+                for line in block["lines"]:
+                    line_text = ""
+                    for span in line["spans"]:
+                        line_text += span["text"]
+                    if line_text.strip():
+                        block_text += line_text.strip() + " "
+                
+                if block_text.strip():
+                    page_elements["text_blocks"].append({
+                        "text": block_text.strip(),
+                        "bbox": block["bbox"],
+                        "block_type": "paragraph"
+                    })
+        
+        # Extract images with better positioning
+        image_list = page.get_images(full=True)
+        for img_index, img in enumerate(image_list):
+            try:
+                xref = img[0]
+                base_image = doc.extract_image(xref)
+                image_bytes = base_image["image"]
+                
+                # Get image rectangles for positioning
+                img_rects = page.get_image_rects(img)
+                if img_rects:
+                    bbox = img_rects[0]
+                    page_elements["images"].append({
+                        "bytes": image_bytes,
+                        "bbox": bbox,
+                        "index": img_index
+                    })
+            except Exception as e:
+                print(f"Error extracting image {img_index}: {e}")
+        
+        pages_elements.append((page.rect, page_elements))
+    
+    doc.close()
     return pages_elements
 
 # ---------- EXCEL READING ----------
@@ -342,7 +398,7 @@ def open_autocad_and_capture_screenshot(dwg_path):
 def open_nx_and_capture_views_manual():
     """
     Guides the user through capturing the three required 3D views from Siemens NX.
-    Updated with more time for NX to open and load properly.
+    Fixed to use unique filenames for each model capture.
     """
     try:
         nx_path = find_nx_executable()
@@ -352,7 +408,6 @@ def open_nx_and_capture_views_manual():
         st.info(f"📍 Found NX at: {nx_path}")
         subprocess.Popen([nx_path], shell=True)
         
-        # Increased opening time from 20 to 30 seconds
         st.info("Opening NX... Please wait (this may take up to 30 seconds).")
         time.sleep(30)
 
@@ -372,11 +427,13 @@ def open_nx_and_capture_views_manual():
         progress_placeholder = st.empty()
         timer_placeholder = st.empty()
 
+        # Get unique model number for this capture session
+        model_count = len(st.session_state.get('nx_model_groups', []))
+        
         for i, view in enumerate(views_to_capture):
             status_placeholder.info(f"📸 **Step {i+1}/{len(views_to_capture)}**: Please set the **{view}** in NX")
             progress_placeholder.progress((i) / len(views_to_capture))
             
-            # Reduced timer to 5 seconds as requested
             for t in range(5, 0, -1):
                 timer_placeholder.info(f"Adjusting to {view}. Screenshot in {t} seconds...")
                 time.sleep(1)
@@ -390,15 +447,19 @@ def open_nx_and_capture_views_manual():
             screenshot = pyautogui.screenshot()
             screen_width, screen_height = pyautogui.size()
             
-            # Updated cropping - remove filename from top (more aggressive top crop)
             left = int(screen_width * 0.28)    
-            top = int(screen_height * 0.20)    # Increased from 0.15 to remove filename
+            top = int(screen_height * 0.20)
             right = int(screen_width * 0.75)   
             bottom = int(screen_height * 0.90)
 
             cropped_screenshot = screenshot.crop((left, top, right, bottom))
-            img_path = os.path.join(tempfile.gettempdir(), f"nxview_{view.replace(' ', '_').lower()}.png")
-            cropped_screenshot.save(img_path)
+            centered_screenshot = center_tire_properly(cropped_screenshot)
+            
+            # Create unique filename with model number and timestamp
+            timestamp = int(time.time())
+            img_path = os.path.join(tempfile.gettempdir(), 
+                                  f"nxview_model{model_count + 1}_{view.replace(' ', '_').lower()}_{timestamp}.png")
+            centered_screenshot.save(img_path)
             screenshots[view] = img_path
 
             st.success(f"{view} captured!")
@@ -418,6 +479,65 @@ def open_nx_and_capture_views_manual():
     except Exception as e:
         st.error(f"Error in NX automation: {e}")
         return {}
+
+# ---------- BETTER TIRE CENTERING ----------
+def center_tire_properly(image):
+    """
+    Centers the tire properly by detecting tire and moving it to exact center.
+    """
+    try:
+        img_array = np.array(image)
+        
+        if len(img_array.shape) == 3:
+            gray = np.mean(img_array, axis=2)
+        else:
+            gray = img_array
+        
+        # Find tire pixels
+        tire_mask = gray < 180
+        
+        if not np.any(tire_mask):
+            return image
+        
+        y_coords, x_coords = np.where(tire_mask)
+        
+        if len(x_coords) == 0:
+            return image
+        
+        # Find tire center
+        tire_center_x = int(np.mean(x_coords))
+        tire_center_y = int(np.mean(y_coords))
+        
+        img_height, img_width = gray.shape
+        image_center_x = img_width // 2
+        image_center_y = img_height // 2
+        
+        # Calculate movement needed
+        shift_x = image_center_x - tire_center_x
+        shift_y = image_center_y - tire_center_y
+        
+        # Create new centered image
+        new_img = PILImage.new('RGB', (img_width, img_height), (200, 200, 200))
+        
+        # Calculate paste position
+        paste_x = max(0, shift_x)
+        paste_y = max(0, shift_y)
+        
+        # Calculate crop region from original
+        crop_left = max(0, -shift_x)
+        crop_top = max(0, -shift_y)
+        crop_right = min(img_width, img_width - shift_x)
+        crop_bottom = min(img_height, img_height - shift_y)
+        
+        if crop_right > crop_left and crop_bottom > crop_top:
+            cropped = image.crop((crop_left, crop_top, crop_right, crop_bottom))
+            new_img.paste(cropped, (paste_x, paste_y))
+            return new_img
+        
+        return image
+        
+    except Exception:
+        return image
 
 # ---------- POWERPOINT GENERATION FUNCTIONS (UPDATED) ----------
 
@@ -563,90 +683,140 @@ def generate_ppt(pdf_pages, excel_df, cad_image_paths, nx_model_groups, output_p
 
     prs.save(output_path)
 
-def create_pdf_content_slides(prs, pdf_pages, section_title):
+def create_pdf_content_slides_improved(prs, pdf_pages, section_title):
     """
-    FIXED: Creates multiple slides for PDF content with proper text distribution using WORD COUNT method.
+    Creates professional PDF slides with bullet points and proper image handling.
     """
     blank_layout = prs.slide_layouts[6]
     
     for page_idx, (page_rect, page_elements) in enumerate(pdf_pages):
-        # Extract all text content first
-        all_text_content = []
-        for element in page_elements:
-            if element["type"] == "text" and element["text"].strip():
-                all_text_content.append(element["text"].strip())
+        text_blocks = page_elements.get("text_blocks", [])
+        images = page_elements.get("images", [])
         
-        # Join all text
-        full_text = " ".join(all_text_content)
+        if not text_blocks and not images:
+            continue
         
-        # Split text by WORD COUNT - much more reliable
-        words = full_text.split()
-        words_per_slide = 80  # Conservative word count per slide
+        # Process text into bullet points
+        bullet_points = []
+        for block in text_blocks:
+            text = block["text"]
+            
+            # Split by common sentence endings and bullet indicators
+            sentences = []
+            for delimiter in ['. ', '• ', '◦ ', '- ', '\n', '• ', '·']:
+                if delimiter in text:
+                    parts = text.split(delimiter)
+                    sentences.extend([part.strip() for part in parts if part.strip()])
+                    break
+            else:
+                # If no delimiters found, split by length
+                words = text.split()
+                chunk_size = 15
+                sentences = [' '.join(words[i:i + chunk_size]) 
+                           for i in range(0, len(words), chunk_size)]
+            
+            bullet_points.extend([s for s in sentences if len(s) > 10])
         
-        # Create word chunks
-        word_chunks = []
-        for i in range(0, len(words), words_per_slide):
-            chunk = words[i:i + words_per_slide]
-            word_chunks.append(" ".join(chunk))
+        # Create slides with bullet points
+        points_per_slide = 8
+        num_text_slides = (len(bullet_points) + points_per_slide - 1) // points_per_slide if bullet_points else 0
         
-        # Ensure we have at least one chunk
-        if not word_chunks:
-            word_chunks = [full_text] if full_text.strip() else ["No content available"]
-        
-        # Create slides for each word chunk
-        for chunk_idx, chunk_text in enumerate(word_chunks):
+        for slide_idx in range(max(1, num_text_slides)):
             slide = prs.slides.add_slide(blank_layout)
             
             # Add slide title
-            if len(word_chunks) > 1:
-                title = f"{section_title} - Page {page_idx + 1} (Part {chunk_idx + 1}/{len(word_chunks)})"
+            if num_text_slides > 1:
+                title = f"{section_title} - Page {page_idx + 1} (Part {slide_idx + 1})"
             else:
                 title = f"{section_title} - Page {page_idx + 1}"
             
             add_slide_banner(slide, title)
             
-            # Add text content with FIXED height
-            content_top = Inches(1.0)
-            content_height = Inches(5.5)  # Fixed height to prevent overflow
-            
-            text_box = slide.shapes.add_textbox(
-                Inches(0.5),
-                content_top,
-                Inches(12.33),
-                content_height
-            )
-            
-            text_frame = text_box.text_frame
-            text_frame.clear()
-            text_frame.word_wrap = True
-            text_frame.auto_size = MSO_AUTO_SIZE.NONE  # Prevent auto-sizing
-            
-            # Add text as one paragraph to prevent overflow
-            p = text_frame.paragraphs[0]
-            p.text = chunk_text
-            p.font.size = Pt(14)
-            p.space_after = Pt(6)
-            p.line_spacing = 1.2
-            p.alignment = PP_ALIGN.LEFT
-        
-        # Handle images on separate slides
-        image_count = 0
-        for element in page_elements:
-            if element["type"] == "image":
-                image_count += 1
-                slide = prs.slides.add_slide(blank_layout)
-                add_slide_banner(slide, f"{section_title} - Page {page_idx + 1} - Image {image_count}")
+            # Add bullet points
+            if bullet_points:
+                start_idx = slide_idx * points_per_slide
+                end_idx = min(start_idx + points_per_slide, len(bullet_points))
+                slide_points = bullet_points[start_idx:end_idx]
                 
-                try:
-                    img_width = Inches(10)
-                    img_height = Inches(5)
-                    img_left = (prs.slide_width - img_width) / 2
-                    img_top = Inches(1.5)
+                # Create bullet point text box
+                text_box = slide.shapes.add_textbox(
+                    Inches(0.5),
+                    Inches(1.2),
+                    Inches(12.33),
+                    Inches(5.8)
+                )
+                
+                text_frame = text_box.text_frame
+                text_frame.clear()
+                text_frame.word_wrap = True
+                text_frame.auto_size = MSO_AUTO_SIZE.NONE
+                
+                for i, point in enumerate(slide_points):
+                    if i == 0:
+                        p = text_frame.paragraphs[0]
+                    else:
+                        p = text_frame.add_paragraph()
                     
-                    image_stream = io.BytesIO(element["bytes"])
-                    slide.shapes.add_picture(image_stream, img_left, img_top, img_width, img_height)
-                except Exception as e:
-                    print(f"Could not add PDF image to slide: {e}")
+                    p.text = point
+                    p.font.size = Pt(16)
+                    p.space_after = Pt(12)
+                    p.line_spacing = 1.3
+                    p.level = 0  # This creates bullet points
+                    p.alignment = PP_ALIGN.LEFT
+        
+        # Create separate slides for images
+        for img_idx, image_data in enumerate(images):
+            slide = prs.slides.add_slide(blank_layout)
+            add_slide_banner(slide, f"{section_title} - Page {page_idx + 1} - Image {img_idx + 1}")
+            
+            try:
+                # Calculate image size and position
+                page_width, page_height = page_rect.width, page_rect.height
+                img_bbox = image_data["bbox"]
+                
+                # Scale image to fit slide properly
+                max_width = prs.slide_width - Inches(1.0)
+                max_height = prs.slide_height - Inches(2.0)
+                
+                # Calculate aspect ratio
+                img_width = img_bbox[2] - img_bbox[0]
+                img_height = img_bbox[3] - img_bbox[1]
+                
+                if img_width > 0 and img_height > 0:
+                    aspect_ratio = img_height / img_width
+                    
+                    # Fit image to slide
+                    if max_width * aspect_ratio <= max_height:
+                        display_width = max_width
+                        display_height = max_width * aspect_ratio
+                    else:
+                        display_height = max_height
+                        display_width = max_height / aspect_ratio
+                    
+                    # Center the image
+                    left = (prs.slide_width - display_width) / 2
+                    top = Inches(1.5) + (max_height - display_height) / 2
+                    
+                    # Add image to slide
+                    image_stream = io.BytesIO(image_data["bytes"])
+                    slide.shapes.add_picture(image_stream, left, top, display_width, display_height)
+                
+            except Exception as e:
+                # Add error message if image fails
+                error_box = slide.shapes.add_textbox(
+                    Inches(2), Inches(3), Inches(8), Inches(2)
+                )
+                error_frame = error_box.text_frame
+                p = error_frame.paragraphs[0]
+                p.text = f"Image could not be displayed\nError: {str(e)[:50]}..."
+                p.font.size = Pt(14)
+                p.alignment = PP_ALIGN.CENTER
+
+def create_pdf_content_slides(prs, pdf_pages, section_title):
+    """
+    Wrapper function that calls the improved PDF slide creation.
+    """
+    create_pdf_content_slides_improved(prs, pdf_pages, section_title)
 
 def create_excel_slides(prs, excel_df, section_title):
     """
@@ -740,12 +910,14 @@ def create_cad_slides(prs, cad_image_paths, section_title):
 
 def create_nx_model_slides(prs, nx_model_groups, section_title):
     """
-    Creates a slide for each NX model, arranging the three views horizontally
-    with section name on top and proper view labels: Front View, Back View, Isometric View.
+    Creates slides for ALL NX models, one slide per model.
     """
     slide_layout = prs.slide_layouts[6]
+    
+    # Create a slide for each model group
     for group_idx, model_group in enumerate(nx_model_groups):
-        if len(model_group) < 3: continue
+        if len(model_group) < 3: 
+            continue
 
         slide = prs.slides.add_slide(slide_layout)
         add_slide_banner(slide, f"{section_title} - Model {group_idx + 1}")
@@ -756,22 +928,26 @@ def create_nx_model_slides(prs, nx_model_groups, section_title):
         image_width = (total_content_width - (2 * gap)) / 3
         
         view_paths = model_group[:3]
-        # Updated view names as requested: Front, Back, Isometric
         view_names = ['Front View', 'Back View', 'Isometric View']
         
         current_left = Inches(0.5)
         
         for i, img_path in enumerate(view_paths):
             try:
-                img = PILImage.open(img_path)
-                aspect_ratio = img.height / img.width
+                original_img = PILImage.open(img_path)
+                centered_img = center_tire_properly(original_img)
+                
+                # Create unique centered image path
+                centered_path = img_path.replace('.png', f'_centered_slide{group_idx}.png')
+                centered_img.save(centered_path)
+                
+                aspect_ratio = centered_img.height / centered_img.width
                 image_height = image_width * aspect_ratio
 
                 top = Inches(1.0) + ((prs.slide_height - Inches(1.0) - image_height) / 2)
 
-                slide.shapes.add_picture(img_path, current_left, top, width=image_width, height=image_height)
+                slide.shapes.add_picture(centered_path, current_left, top, width=image_width, height=image_height)
                 
-                # Add view name label below each image
                 label_top = top + image_height + Inches(0.1)
                 label_box = slide.shapes.add_textbox(current_left, label_top, image_width, Inches(0.3))
                 label_frame = label_box.text_frame
@@ -788,129 +964,88 @@ def create_nx_model_slides(prs, nx_model_groups, section_title):
 
 def create_nx_closeup_slide(prs, nx_model_groups, section_title):
     """
-    Creates a close-up slide showing Front and Isometric views side by side
-    with IMPROVED FRONT VIEW cropping to show full tire width.
+    Creates close-up slides for ALL models (one slide per model).
     """
     if not nx_model_groups or len(nx_model_groups) == 0:
         return
     
     slide_layout = prs.slide_layouts[6]
-    slide = prs.slides.add_slide(slide_layout)
     
-    # Add header banner
-    add_slide_banner(slide, section_title)
-    
-    # Get first model group
-    model_group = nx_model_groups[0]
-    
-    if len(model_group) >= 3:
-        # Front view (index 1) and Isometric view (index 2)
+    # Create close-up slide for each model
+    for group_idx, model_group in enumerate(nx_model_groups):
+        if len(model_group) < 3:
+            continue
+            
+        slide = prs.slides.add_slide(slide_layout)
+        
+        # Update title to include model number
+        if len(nx_model_groups) > 1:
+            slide_title = f"{section_title} - Model {group_idx + 1}"
+        else:
+            slide_title = section_title
+            
+        add_slide_banner(slide, slide_title)
+        
         front_view_path = model_group[1]  # Front View
         isometric_view_path = model_group[2]  # Isometric View
         
-        # Calculate positions for side-by-side layout
         gap = Inches(0.5)
         image_width = (prs.slide_width - Inches(1.0) - gap) / 2
         
-        # Left image (Front view)
         left_img_left = Inches(0.5)
-        # Right image (Isometric view)  
         right_img_left = left_img_left + image_width + gap
         
         content_top = Inches(1.2)
-        available_height = prs.slide_height - content_top - Inches(1.0)  # Leave space for labels
+        available_height = prs.slide_height - content_top - Inches(1.0)
         
-        def create_front_view_crop(img_path, zoom_factor=1.8):
-            """Create a VERTICAL STRIP crop for front view to show full tire width"""
+        def create_zoomed_centered_view(img_path, zoom_factor=2.5, model_idx=0):
+            """Create zoomed centered view with unique filename"""
             try:
                 img = PILImage.open(img_path)
-                width, height = img.size
+                centered_img = center_tire_properly(img)
                 
-                # For front view, we want a vertical strip showing the full tire width
-                # Take a vertical slice from the center
-                slice_width = int(width / zoom_factor)
-                center_x = width // 2
+                width, height = centered_img.size
                 
-                # Calculate vertical strip boundaries
-                left = max(0, center_x - slice_width // 2)
-                right = min(width, center_x + slice_width // 2)
-                top = 0  # Keep full height
-                bottom = height  # Keep full height
-                
-                # Crop to vertical strip and resize for clarity
-                cropped = img.crop((left, top, right, bottom))
-                # Resize to emphasize the tire pattern
-                resized = cropped.resize((width, height), PILImage.Resampling.LANCZOS)
-                
-                # Save cropped image
-                cropped_path = img_path.replace('.png', '_front_strip.png')
-                resized.save(cropped_path)
-                return cropped_path
-            except Exception as e:
-                print(f"Error creating front view crop: {e}")
-                return img_path
-        
-        def create_center_cropped_zoomed_image(img_path, zoom_factor=2.0):
-            """Create a center-cropped zoomed version for isometric view"""
-            try:
-                img = PILImage.open(img_path)
-                width, height = img.size
-                
-                # Find center of image
-                center_x = width // 2
-                center_y = height // 2
-                
-                # Calculate crop dimensions for zoom
                 crop_width = int(width / zoom_factor)
                 crop_height = int(height / zoom_factor)
                 
-                # Ensure center crop
-                left = max(0, center_x - crop_width // 2)
-                top = max(0, center_y - crop_height // 2)
-                right = min(width, left + crop_width)
-                bottom = min(height, top + crop_height)
+                center_x = width // 2
+                center_y = height // 2
                 
-                # Adjust if crop goes beyond image boundaries
-                if right > width:
-                    right = width
-                    left = right - crop_width
-                if bottom > height:
-                    bottom = height
-                    top = bottom - crop_height
-                if left < 0:
-                    left = 0
-                    right = left + crop_width
-                if top < 0:
-                    top = 0
-                    bottom = top + crop_height
+                left = center_x - crop_width // 2
+                top = center_y - crop_height // 2
+                right = left + crop_width
+                bottom = top + crop_height
                 
-                # Crop from center and resize for zoom effect
-                cropped = img.crop((left, top, right, bottom))
-                zoomed = cropped.resize((width, height), PILImage.Resampling.LANCZOS)
+                left = max(0, left)
+                top = max(0, top)
+                right = min(width, right)
+                bottom = min(height, bottom)
                 
-                # Save zoomed image
-                zoomed_path = img_path.replace('.png', '_center_zoomed.png')
-                zoomed.save(zoomed_path)
-                return zoomed_path
-            except Exception as e:
-                print(f"Error creating center zoomed image: {e}")
+                cropped = centered_img.crop((left, top, right, bottom))
+                resized = cropped.resize((width, height), PILImage.Resampling.LANCZOS)
+                
+                # Create unique filename for each model
+                processed_path = img_path.replace('.png', f'_zoomed_model{model_idx}.png')
+                resized.save(processed_path)
+                return processed_path
+            except Exception:
                 return img_path
         
-        # Add Front view (vertical strip crop to show full tire width)
+        # Front view - with model-specific filename
         try:
             if os.path.exists(front_view_path):
-                cropped_front_path = create_front_view_crop(front_view_path, zoom_factor=1.8)
+                zoomed_front_path = create_zoomed_centered_view(front_view_path, zoom_factor=2.5, model_idx=group_idx)
                 
-                img = PILImage.open(cropped_front_path)
+                img = PILImage.open(zoomed_front_path)
                 aspect_ratio = img.height / img.width
                 image_height = min(image_width * aspect_ratio, available_height - Inches(0.5))
                 
                 top_pos = content_top + (available_height - image_height - Inches(0.5)) / 2
                 
-                slide.shapes.add_picture(cropped_front_path, left_img_left, top_pos, 
+                slide.shapes.add_picture(zoomed_front_path, left_img_left, top_pos, 
                                        width=image_width, height=image_height)
                 
-                # Add "Front View" label below the image
                 label_top = top_pos + image_height + Inches(0.1)
                 label_box = slide.shapes.add_textbox(left_img_left, label_top, image_width, Inches(0.4))
                 label_frame = label_box.text_frame
@@ -921,12 +1056,12 @@ def create_nx_closeup_slide(prs, nx_model_groups, section_title):
                 p.alignment = PP_ALIGN.CENTER
                 
         except Exception as e:
-            st.error(f"Error adding improved front view: {e}")
+            st.error(f"Error adding front view for model {group_idx + 1}: {e}")
         
-        # Add Isometric view (center-cropped and zoomed)
+        # Isometric view - with model-specific filename
         try:
             if os.path.exists(isometric_view_path):
-                zoomed_iso_path = create_center_cropped_zoomed_image(isometric_view_path, zoom_factor=2.5)
+                zoomed_iso_path = create_zoomed_centered_view(isometric_view_path, zoom_factor=2.5, model_idx=group_idx)
                 
                 img = PILImage.open(zoomed_iso_path)
                 aspect_ratio = img.height / img.width
@@ -937,7 +1072,6 @@ def create_nx_closeup_slide(prs, nx_model_groups, section_title):
                 slide.shapes.add_picture(zoomed_iso_path, right_img_left, top_pos, 
                                        width=image_width, height=image_height)
                 
-                # Add "Isometric View" label below the image
                 label_top = top_pos + image_height + Inches(0.1)
                 label_box = slide.shapes.add_textbox(right_img_left, label_top, image_width, Inches(0.4))
                 label_frame = label_box.text_frame
@@ -948,7 +1082,7 @@ def create_nx_closeup_slide(prs, nx_model_groups, section_title):
                 p.alignment = PP_ALIGN.CENTER
                 
         except Exception as e:
-            st.error(f"Error adding zoomed isometric view: {e}")
+            st.error(f"Error adding isometric view for model {group_idx + 1}: {e}")
 
 
 # ---------- STREAMLIT GUI ----------
@@ -1013,7 +1147,7 @@ def updated_tab1_section():
 
 def updated_tab2_section():
     """
-    UI and logic for the 'Capture NX 3D Models' tab.
+    Simple NX UI with single button to capture multiple models.
     """
     st.header("📐 NX 3D Model Capture")
     
@@ -1075,7 +1209,7 @@ def updated_tab3_section():
                         pdf_path = os.path.join(tmpdir, pdf_file.name)
                         with open(pdf_path, "wb") as f:
                             f.write(pdf_file.getvalue())
-                        all_pdf_pages.extend(extract_pdf_elements(pdf_path))
+                        all_pdf_pages.extend(extract_pdf_elements_improved(pdf_path))
                     
                     all_excel_df = pd.concat(
                         [read_excel_data(excel_file) for excel_file in excel_files], 
